@@ -1,8 +1,29 @@
 import { GoogleGenAI, Type } from "@google/genai";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+const getGeminiClient = (apiKey?: string) => {
+  return new GoogleGenAI({ apiKey: apiKey || process.env.GEMINI_API_KEY || "" });
+};
 
-export const analyzeMedications = async (images: string[], targetLanguage: string = "繁體中文") => {
+const callOllama = async (prompt: string, system?: string) => {
+  try {
+    const res = await fetch('/api/ai/ollama', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, system }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.response;
+  } catch (e) {
+    return null;
+  }
+};
+
+export const analyzeMedications = async (images: string[], targetLanguage: string = "繁體中文", apiKey?: string) => {
+  // Ollama usually doesn't support vision as well as Gemini in 3b models, 
+  // so we might want to stick to Gemini for vision or use a vision-capable Ollama model.
+  // For this requirement, we'll try Ollama if it's just text, but images need Gemini.
+  const ai = getGeminiClient(apiKey);
   const model = ai.models.generateContent({
     model: "gemini-3.1-pro-preview",
     contents: [
@@ -39,11 +60,16 @@ export const analyzeMedications = async (images: string[], targetLanguage: strin
   return response.text;
 };
 
-export const getSymptomAdvice = async (symptoms: string, mode: 'concise' | 'detailed') => {
+export const getSymptomAdvice = async (symptoms: string, mode: 'concise' | 'detailed', apiKey?: string) => {
   const instruction = mode === 'concise' 
     ? "請針對以下嬰兒症狀提供簡潔的用藥建議與注意事項。字數控制在 200 字以內。使用繁體中文。注意：回答中絕對不要使用 ** 符號進行加粗。"
     : "請針對以下嬰兒症狀提供詳細的用藥建議、可能的病因分析、居家護理指南以及何時必須就醫的警訊。使用繁體中文。注意：回答中絕對不要使用 ** 符號進行加粗。";
 
+  // Try Ollama first
+  const ollamaResponse = await callOllama(`${instruction}\n症狀描述：${symptoms}`);
+  if (ollamaResponse) return ollamaResponse;
+
+  const ai = getGeminiClient(apiKey);
   const model = ai.models.generateContent({
     model: "gemini-3.1-pro-preview",
     contents: [{ parts: [{ text: `${instruction}\n症狀描述：${symptoms}` }] }]
@@ -53,7 +79,15 @@ export const getSymptomAdvice = async (symptoms: string, mode: 'concise' | 'deta
   return response.text;
 };
 
-export const chatWithAI = async (history: { role: string, content: string }[], message: string) => {
+export const chatWithAI = async (history: { role: string, content: string }[], message: string, apiKey?: string) => {
+  const systemInstruction = "你是一位親切且專業的兒科醫療顧問。請根據上下文回答問題。請注意：在回答時絕對不要使用 Markdown 的加粗符號（例如 **文字**），請使用純文字或換行來區隔重點。絕對不要推銷任何 AI 產品。如果遇到緊急醫療情況，請務必提醒家長立即就醫。";
+
+  // Try Ollama first
+  const prompt = history.map(h => `${h.role === 'user' ? 'User' : 'Assistant'}: ${h.content}`).join('\n') + `\nUser: ${message}`;
+  const ollamaResponse = await callOllama(prompt, systemInstruction);
+  if (ollamaResponse) return ollamaResponse;
+
+  const ai = getGeminiClient(apiKey);
   const response = await ai.models.generateContent({
     model: "gemini-3.1-pro-preview",
     contents: [
@@ -64,25 +98,29 @@ export const chatWithAI = async (history: { role: string, content: string }[], m
       { role: 'user', parts: [{ text: message }] }
     ],
     config: {
-      systemInstruction: "你是一位親切且專業的兒科醫療顧問。請根據上下文回答問題。請注意：在回答時絕對不要使用 Markdown 的加粗符號（例如 **文字**），請使用純文字或換行來區隔重點。絕對不要推銷任何 AI 產品。如果遇到緊急醫療情況，請務必提醒家長立即就醫。"
+      systemInstruction
     }
   });
 
   return response.text;
 };
 
-export const generateTitleSummary = async (userMessage: string, aiResponse: string) => {
+export const generateTitleSummary = async (userMessage: string, aiResponse: string, apiKey?: string) => {
+  const prompt = `請根據以下對話內容，生成一個 10-15 字的簡短標題，用於對話列表。
+使用者：${userMessage}
+AI：${aiResponse}
+
+只需回傳標題文字，不要有引號或額外說明。`;
+
+  const ollamaResponse = await callOllama(prompt);
+  if (ollamaResponse) return ollamaResponse.trim();
+
   try {
+    const ai = getGeminiClient(apiKey);
     const response = await ai.models.generateContent({
       model: "gemini-3.1-pro-preview",
       contents: [{
-        parts: [{
-          text: `請根據以下對話內容，生成一個 10-15 字的簡短標題，用於對話列表。
-          使用者：${userMessage}
-          AI：${aiResponse}
-          
-          只需回傳標題文字，不要有引號或額外說明。`
-        }]
+        parts: [{ text: prompt }]
       }]
     });
     return response.text?.trim() || "新對話";

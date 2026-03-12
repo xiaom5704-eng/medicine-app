@@ -83,6 +83,46 @@ async function startServer() {
     res.json({ success: true });
   });
 
+  // Ollama Proxy
+  app.post("/api/ai/ollama", async (req, res) => {
+    const ollamaUrl = process.env.OLLAMA_API_BASE_URL || "http://localhost:11434";
+    try {
+      const response = await fetch(`${ollamaUrl}/api/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: "llama3.2:3b",
+          prompt: req.body.prompt,
+          stream: false,
+          system: req.body.system || ""
+        }),
+      });
+      if (!response.ok) throw new Error("Ollama error");
+      const data = await response.json();
+      res.json(data);
+    } catch (error) {
+      res.status(503).json({ error: "Ollama service unavailable" });
+    }
+  });
+
+  // Check Ollama status
+  app.get("/api/ai/ollama/status", async (req, res) => {
+    const ollamaUrl = process.env.OLLAMA_API_BASE_URL || "http://localhost:11434";
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 2000);
+      const response = await fetch(`${ollamaUrl}/api/tags`, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (response.ok) {
+        res.json({ status: "online" });
+      } else {
+        res.json({ status: "offline" });
+      }
+    } catch (error) {
+      res.json({ status: "offline" });
+    }
+  });
+
   // Vite middleware
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({

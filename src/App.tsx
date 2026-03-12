@@ -35,13 +35,29 @@ export default function App() {
   const [renamingSession, setRenamingSession] = useState<Session | null>(null);
   const [newTitle, setNewTitle] = useState('');
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
+  const [userApiKey, setUserApiKey] = useState('');
+  const [isOllamaOnline, setIsOllamaOnline] = useState<boolean | null>(null);
+  const [showApiKeyInput, setShowApiKeyInput] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     fetchSessions();
+    checkOllamaStatus();
+    const interval = setInterval(checkOllamaStatus, 30000); // Check every 30s
+    return () => clearInterval(interval);
   }, []);
+
+  const checkOllamaStatus = async () => {
+    try {
+      const res = await fetch('/api/ai/ollama/status');
+      const data = await res.json();
+      setIsOllamaOnline(data.status === 'online');
+    } catch (e) {
+      setIsOllamaOnline(false);
+    }
+  };
 
   useEffect(() => {
     if (currentSessionId) {
@@ -163,7 +179,11 @@ export default function App() {
         body: JSON.stringify(userMsg),
       });
 
-      const aiResponse = await chatWithAI(messages.map(m => ({ role: m.role, content: m.content })), inputText);
+      const aiResponse = await chatWithAI(
+        messages.map(m => ({ role: m.role, content: m.content })), 
+        inputText,
+        userApiKey
+      );
       const aiMsg: Message = { session_id: currentSessionId, role: 'assistant', content: aiResponse || '抱歉，我現在無法回答。' };
       
       await fetch('/api/messages', {
@@ -177,7 +197,7 @@ export default function App() {
       // Auto-titling logic
       const currentSession = sessions.find(s => s.id === currentSessionId);
       if (currentSession && !currentSession.is_manual_title && messages.length === 0) {
-        const generatedTitle = await generateTitleSummary(inputText, aiResponse || '');
+        const generatedTitle = await generateTitleSummary(inputText, aiResponse || '', userApiKey);
         if (generatedTitle) {
           await fetch(`/api/sessions/${currentSessionId}`, {
             method: 'PATCH',
@@ -284,7 +304,7 @@ export default function App() {
     }
 
     try {
-      const result = await analyzeMedications(medFiles.map(f => f.preview), targetLanguage);
+      const result = await analyzeMedications(medFiles.map(f => f.preview), targetLanguage, userApiKey);
       const aiMsg: Message = { 
         session_id: sessionId, 
         role: 'assistant', 
@@ -313,7 +333,7 @@ export default function App() {
     setSymptomResult(null);
 
     try {
-      const result = await getSymptomAdvice(symptoms, symptomMode);
+      const result = await getSymptomAdvice(symptoms, symptomMode, userApiKey);
       setSymptomResult(result);
       
       // Still save to history for record keeping
@@ -445,6 +465,22 @@ export default function App() {
               <Stethoscope className="text-emerald-600" size={22} />
               智慧醫療助理
             </h1>
+            
+            {/* AI Status Indicator */}
+            <div className="flex items-center gap-2 ml-4 px-3 py-1 bg-slate-50 rounded-full border border-slate-200">
+              <div className={`w-2 h-2 rounded-full ${isOllamaOnline ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+              <span className="text-xs font-medium text-slate-600">
+                {isOllamaOnline ? 'Ollama 已連線' : 'Ollama 未連線 (使用 Gemini)'}
+              </span>
+              {!isOllamaOnline && (
+                <button 
+                  onClick={() => setShowApiKeyInput(!showApiKeyInput)}
+                  className="text-[10px] bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded hover:bg-emerald-200 transition-colors"
+                >
+                  {userApiKey ? '修改金鑰' : '輸入金鑰'}
+                </button>
+              )}
+            </div>
           </div>
 
           <nav className="flex bg-slate-100 p-1 rounded-xl">
@@ -468,6 +504,46 @@ export default function App() {
             </button>
           </nav>
         </header>
+
+        {/* API Key Input Overlay */}
+        <AnimatePresence>
+          {showApiKeyInput && !isOllamaOnline && (
+            <motion.div 
+              initial={{ opacity: 0, y: -20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="absolute top-16 left-0 right-0 bg-white border-b border-slate-200 p-4 z-20 shadow-lg"
+            >
+              <div className="max-w-xl mx-auto flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-bold text-slate-800">Gemini API 設定</h3>
+                  <button onClick={() => setShowApiKeyInput(false)} className="text-slate-400 hover:text-slate-600">
+                    <X size={16} />
+                  </button>
+                </div>
+                <p className="text-xs text-slate-500">
+                  目前無法連線至本地 Ollama 服務。請輸入您的 **Gemini API 金鑰** 以繼續使用 AI 功能。
+                  您可以從 <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-emerald-600 underline">Google AI Studio</a> 獲取金鑰。
+                </p>
+                <div className="flex gap-2">
+                  <input 
+                    type="password" 
+                    value={userApiKey}
+                    onChange={(e) => setUserApiKey(e.target.value)}
+                    placeholder="在此輸入 Gemini API Key..."
+                    className="flex-1 p-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                  <button 
+                    onClick={() => setShowApiKeyInput(false)}
+                    className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-bold hover:bg-emerald-700 transition-colors"
+                  >
+                    儲存並關閉
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Content Area */}
         <div className="flex-1 overflow-y-auto p-6">
