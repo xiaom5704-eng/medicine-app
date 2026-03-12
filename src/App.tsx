@@ -12,11 +12,14 @@ import {
   Pill, 
   AlertCircle,
   Loader2,
-  X
+  X,
+  Pin,
+  MoreVertical,
+  Edit2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Session, Message, MedicationFile } from './types';
-import { analyzeMedications, getSymptomAdvice, chatWithAI } from './services/gemini';
+import { analyzeMedications, getSymptomAdvice, chatWithAI, generateTitleSummary } from './services/gemini';
 
 export default function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -28,6 +31,10 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'chat' | 'medication' | 'symptoms'>('chat');
   const [symptomMode, setSymptomMode] = useState<'concise' | 'detailed'>('concise');
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isRenameDialogOpen, setIsRenameDialogOpen] = useState(false);
+  const [renamingSession, setRenamingSession] = useState<Session | null>(null);
+  const [newTitle, setNewTitle] = useState('');
+  const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -47,6 +54,12 @@ export default function App() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  useEffect(() => {
+    const handleClickOutside = () => setActiveMenuId(null);
+    window.addEventListener('click', handleClickOutside);
+    return () => window.removeEventListener('click', handleClickOutside);
+  }, []);
 
   const fetchSessions = async () => {
     try {
@@ -70,7 +83,7 @@ export default function App() {
 
   const createNewSession = async () => {
     const id = Date.now().toString();
-    const title = `新諮詢 ${new Date().toLocaleString('zh-TW', { hour: '2-digit', minute: '2-digit' })}`;
+    const title = `新對話 ${new Date().toLocaleString('zh-TW', { hour: '2-digit', minute: '2-digit' })}`;
     try {
       await fetch('/api/sessions', {
         method: 'POST',
@@ -93,6 +106,45 @@ export default function App() {
       if (currentSessionId === id) setCurrentSessionId(null);
     } catch (e) {
       console.error("Failed to delete session", e);
+    }
+  };
+
+  const togglePin = async (session: Session, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await fetch(`/api/sessions/${session.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_pinned: !session.is_pinned }),
+      });
+      fetchSessions();
+      setActiveMenuId(null);
+    } catch (e) {
+      console.error("Failed to toggle pin", e);
+    }
+  };
+
+  const openRenameDialog = (session: Session, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setRenamingSession(session);
+    setNewTitle(session.title);
+    setIsRenameDialogOpen(true);
+    setActiveMenuId(null);
+  };
+
+  const handleRename = async () => {
+    if (!renamingSession || !newTitle.trim()) return;
+    try {
+      await fetch(`/api/sessions/${renamingSession.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: newTitle, is_manual_title: 1 }),
+      });
+      fetchSessions();
+      setIsRenameDialogOpen(false);
+      setRenamingSession(null);
+    } catch (e) {
+      console.error("Failed to rename session", e);
     }
   };
 
@@ -121,6 +173,20 @@ export default function App() {
       });
 
       setMessages(prev => [...prev, aiMsg]);
+
+      // Auto-titling logic
+      const currentSession = sessions.find(s => s.id === currentSessionId);
+      if (currentSession && !currentSession.is_manual_title && messages.length === 0) {
+        const generatedTitle = await generateTitleSummary(inputText, aiResponse || '');
+        if (generatedTitle) {
+          await fetch(`/api/sessions/${currentSessionId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title: generatedTitle, is_manual_title: 0 }),
+          });
+          fetchSessions();
+        }
+      }
     } catch (error) {
       console.error(error);
     } finally {
@@ -295,10 +361,10 @@ export default function App() {
         <div className="p-4 border-bottom border-slate-100">
           <button 
             onClick={createNewSession}
-            className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white py-2.5 rounded-xl transition-all shadow-sm font-medium"
+            className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 text-white py-3 rounded-2xl transition-all shadow-md font-bold text-lg"
           >
-            <Plus size={18} />
-            新諮詢對話
+            <Plus size={20} />
+            建立新對話
           </button>
         </div>
         
@@ -307,24 +373,60 @@ export default function App() {
             <div 
               key={session.id}
               onClick={() => setCurrentSessionId(session.id)}
-              className={`group flex items-center justify-between p-3 rounded-xl cursor-pointer transition-colors ${currentSessionId === session.id ? 'bg-emerald-50 text-emerald-700' : 'hover:bg-slate-50'}`}
+              className={`group relative flex items-center justify-between p-3 rounded-xl cursor-pointer transition-colors ${currentSessionId === session.id ? 'bg-emerald-50 text-emerald-700' : 'hover:bg-slate-50'}`}
             >
-              <div className="flex items-center gap-3 overflow-hidden">
-                <History size={16} className={currentSessionId === session.id ? 'text-emerald-600' : 'text-slate-400'} />
+              <div className="flex items-center gap-3 overflow-hidden flex-1">
+                {session.is_pinned ? (
+                  <Pin size={14} className="text-emerald-600 fill-emerald-600 shrink-0" />
+                ) : (
+                  <History size={16} className={currentSessionId === session.id ? 'text-emerald-600' : 'text-slate-400'} />
+                )}
                 <span className="truncate text-sm font-medium">{session.title}</span>
               </div>
-              <button 
-                onClick={(e) => deleteSession(session.id, e)}
-                className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition-all"
-              >
-                <Trash2 size={14} />
-              </button>
+              
+              <div className="flex items-center gap-1">
+                <button 
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setActiveMenuId(activeMenuId === session.id ? null : session.id);
+                  }}
+                  className="opacity-0 group-hover:opacity-100 p-1 hover:bg-slate-200 rounded-md transition-all text-slate-400"
+                >
+                  <MoreVertical size={14} />
+                </button>
+              </div>
+
+              {activeMenuId === session.id && (
+                <div className="absolute right-2 top-10 w-32 bg-white border border-slate-200 rounded-lg shadow-xl z-50 py-1">
+                  <button 
+                    onClick={(e) => togglePin(session, e)}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-slate-50 text-slate-600"
+                  >
+                    <Pin size={12} />
+                    {session.is_pinned ? '取消釘選' : '釘選至頂部'}
+                  </button>
+                  <button 
+                    onClick={(e) => openRenameDialog(session, e)}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-slate-50 text-slate-600"
+                  >
+                    <Edit2 size={12} />
+                    重新命名
+                  </button>
+                  <button 
+                    onClick={(e) => deleteSession(session.id, e)}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-red-50 text-red-600"
+                  >
+                    <Trash2 size={12} />
+                    刪除對話
+                  </button>
+                </div>
+              )}
             </div>
           ))}
         </div>
 
         <div className="p-4 border-t border-slate-100 text-xs text-slate-400 text-center">
-          嬰幼兒用藥安全助手 v1.0
+          智慧醫療助理 v1.0
         </div>
       </motion.aside>
 
@@ -341,7 +443,7 @@ export default function App() {
             </button>
             <h1 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
               <Stethoscope className="text-emerald-600" size={22} />
-              嬰幼兒用藥安全助手
+              智慧醫療助理
             </h1>
           </div>
 
@@ -350,7 +452,7 @@ export default function App() {
               onClick={() => setActiveTab('chat')}
               className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'chat' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
             >
-              諮詢對話
+              對話模式
             </button>
             <button 
               onClick={() => setActiveTab('medication')}
@@ -362,7 +464,7 @@ export default function App() {
               onClick={() => setActiveTab('symptoms')}
               className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'symptoms' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
             >
-              症狀建議
+              症狀諮詢
             </button>
           </nav>
         </header>
@@ -543,8 +645,8 @@ export default function App() {
                 >
                   <div className="w-full max-w-2xl bg-white p-8 rounded-3xl shadow-xl border border-slate-100 mb-6">
                     <div className="text-center mb-8">
-                      <h2 className="text-2xl font-bold text-slate-900 mb-2">嬰兒症狀用藥建議</h2>
-                      <p className="text-slate-500">請描述嬰兒目前的症狀，建議將直接顯示於下方。</p>
+                      <h2 className="text-2xl font-bold text-slate-900 mb-2">智慧醫療助理</h2>
+                      <p className="text-slate-500">請描述您的症狀，AI 將為您提供建議，並建議您諮詢專業醫生。</p>
                     </div>
 
                     <div className="space-y-6">
@@ -552,7 +654,7 @@ export default function App() {
                         <label className="block text-sm font-semibold text-slate-700 mb-2">症狀描述</label>
                         <textarea 
                           className="w-full h-32 p-4 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition-all outline-none resize-none"
-                          placeholder="例如：六個月大的嬰兒發燒 38.5 度，伴隨輕微咳嗽..."
+                          placeholder="例如：頭痛、發燒、咳嗽等..."
                           id="symptomInput"
                         ></textarea>
                       </div>
@@ -562,13 +664,13 @@ export default function App() {
                           onClick={() => setSymptomMode('concise')}
                           className={`flex-1 py-3 rounded-xl font-medium border transition-all ${symptomMode === 'concise' ? 'bg-emerald-50 border-emerald-500 text-emerald-700' : 'bg-white border-slate-200 text-slate-500'}`}
                         >
-                          簡潔模式
+                          簡潔版建議
                         </button>
                         <button 
                           onClick={() => setSymptomMode('detailed')}
                           className={`flex-1 py-3 rounded-xl font-medium border transition-all ${symptomMode === 'detailed' ? 'bg-emerald-50 border-emerald-500 text-emerald-700' : 'bg-white border-slate-200 text-slate-500'}`}
                         >
-                          詳細模式
+                          詳細版建議
                         </button>
                       </div>
 
@@ -644,6 +746,47 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* Rename Dialog */}
+      <AnimatePresence>
+        {isRenameDialogOpen && (
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden"
+            >
+              <div className="p-6">
+                <h3 className="text-lg font-bold text-slate-900 mb-4">重新命名對話</h3>
+                <input 
+                  type="text" 
+                  value={newTitle}
+                  onChange={(e) => setNewTitle(e.target.value)}
+                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500"
+                  placeholder="輸入新標題..."
+                  autoFocus
+                  onKeyPress={(e) => e.key === 'Enter' && handleRename()}
+                />
+              </div>
+              <div className="flex border-t border-slate-100">
+                <button 
+                  onClick={() => setIsRenameDialogOpen(false)}
+                  className="flex-1 py-4 text-slate-500 font-medium hover:bg-slate-50 transition-colors"
+                >
+                  取消
+                </button>
+                <button 
+                  onClick={handleRename}
+                  className="flex-1 py-4 text-emerald-600 font-bold hover:bg-emerald-50 transition-colors border-l border-slate-100"
+                >
+                  確認
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

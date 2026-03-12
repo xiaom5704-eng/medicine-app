@@ -1,0 +1,30 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - OLLAMA_API_BASE_URL=http://ollama-service:11434
+      - NODE_ENV=production
+    depends_on:
+      - ollama-service
+    restart: always
+
+  ollama-service:
+    image: ollama/ollama
+    container_name: ollama-service
+    volumes:
+      - ollama_data:/root/.ollama
+    # 啟動時自動下載模型
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        ollama serve &
+        sleep 5
+        echo "Pulling llama3.2:3b model..."
+        ollama pull llama3.2:3b
+        wait
+
+volumes:
+  ollama_data:

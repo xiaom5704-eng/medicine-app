@@ -1,6 +1,6 @@
 {
-  "name": "嬰幼兒用藥安全助手 (Infant MedSafe)",
-  "description": "專業的嬰幼兒藥物辨識、風險評估與症狀諮詢平台，支援 OCR 辨識與多藥物交互作用分析。",
+  "name": "智慧醫療助理",
+  "description": "專業的嬰幼兒症狀諮詢助手，提供用藥建議與風險評估，支援拍照辨識與多國語言翻譯。",
   "requestFramePermissions": [
     "camera"
   ]

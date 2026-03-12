@@ -1,6 +1,8 @@
 export interface Session {
   id: string;
   title: string;
+  is_pinned: boolean;
+  is_manual_title: boolean;
   created_at: string;
 }
 

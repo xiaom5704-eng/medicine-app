@@ -70,3 +70,24 @@ export const chatWithAI = async (history: { role: string, content: string }[], m
 
   return response.text;
 };
+
+export const generateTitleSummary = async (userMessage: string, aiResponse: string) => {
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3.1-pro-preview",
+      contents: [{
+        parts: [{
+          text: `請根據以下對話內容，生成一個 10-15 字的簡短標題，用於對話列表。
+          使用者：${userMessage}
+          AI：${aiResponse}
+          
+          只需回傳標題文字，不要有引號或額外說明。`
+        }]
+      }]
+    });
+    return response.text?.trim() || "新對話";
+  } catch (error) {
+    console.error("Error generating title summary:", error);
+    return "新對話";
+  }
+};

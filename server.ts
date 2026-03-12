@@ -14,6 +14,8 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     title TEXT,
+    is_pinned INTEGER DEFAULT 0,
+    is_manual_title INTEGER DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
   CREATE TABLE IF NOT EXISTS messages (
@@ -26,6 +28,14 @@ db.exec(`
   );
 `);
 
+// Migration for existing databases
+try {
+  db.exec("ALTER TABLE sessions ADD COLUMN is_pinned INTEGER DEFAULT 0");
+} catch (e) {}
+try {
+  db.exec("ALTER TABLE sessions ADD COLUMN is_manual_title INTEGER DEFAULT 0");
+} catch (e) {}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -34,13 +44,25 @@ async function startServer() {
 
   // API Routes
   app.get("/api/sessions", (req, res) => {
-    const sessions = db.prepare("SELECT * FROM sessions ORDER BY created_at DESC").all();
+    // Sort logic: pinned first, then by date
+    const sessions = db.prepare("SELECT * FROM sessions ORDER BY is_pinned DESC, created_at DESC").all();
     res.json(sessions);
   });
 
   app.post("/api/sessions", (req, res) => {
     const { id, title } = req.body;
-    db.prepare("INSERT INTO sessions (id, title) VALUES (?, ?)").run(id, title);
+    db.prepare("INSERT INTO sessions (id, title, is_pinned, is_manual_title) VALUES (?, ?, 0, 0)").run(id, title);
+    res.json({ success: true });
+  });
+
+  app.patch("/api/sessions/:id", (req, res) => {
+    const { title, is_pinned, is_manual_title } = req.body;
+    if (title !== undefined) {
+      db.prepare("UPDATE sessions SET title = ?, is_manual_title = ? WHERE id = ?").run(title, is_manual_title ?? 1, req.params.id);
+    }
+    if (is_pinned !== undefined) {
+      db.prepare("UPDATE sessions SET is_pinned = ? WHERE id = ?").run(is_pinned ? 1 : 0, req.params.id);
+    }
     res.json({ success: true });
   });
 
