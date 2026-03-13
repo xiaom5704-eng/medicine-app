@@ -71,11 +71,32 @@
 
 ---
 
-## 🛠️ 技術棧
-- **Frontend**: React + Vite + Tailwind CSS + Framer Motion
+## 🛠️ 開發者指南
+
+### 安裝與啟動
+1. 確保已安裝 Node.js (v20+)
+2. 安裝套件：`npm install`
+3. 啟動開發伺服器：`npm run dev` (包含 Vite 前端與 Express 後端)
+
+### 相關腳本
+- `npm run build`: 同時編譯前端與後端伺服器檔案。
+- `npm run electron:dev`: 啟動 Electron 開發環境。
+- `npm run electron:build`: 打包 Windows 安裝檔。
+
+## 🤖 CI/CD 與自動化
+本專案使用 GitHub Actions 定義了自動化工作流 (.github/workflows/main.yml)：
+- **自動化測試與編譯**：每當 `push` 或 `Pull Request` 到 `main` 分支時，會自動執行 `npm install` 與 `npm run build`。
+- **Docker 檢查**：自動檢查 Dockerfile 是否能正確編譯，確保部署穩定性。
+
+---
+
+## 🏗️ 技術棧
+- **Frontend**: React 19 + Vite 6 + Tailwind CSS 4 + Framer Motion
 - **Backend**: Express + SQLite (Better-SQLite3)
 - **AI**: Ollama (Llama 3.2:3b) & Google Gemini API
 - **Container**: Docker & Docker Compose
+- **CI/CD**: GitHub Actions
+- **Desktop**: Electron 41
 
 ---
 
