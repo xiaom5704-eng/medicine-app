@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import rehypeRaw from 'rehype-raw';
 
 interface MarkdownRendererProps {
   content: string;
@@ -16,7 +17,7 @@ const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) => {
     <div className="prose prose-slate max-w-none prose-sm overflow-hidden">
       <ReactMarkdown 
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[require('rehype-raw')]}
+        rehypePlugins={[rehypeRaw]}
         components={{
           table: ({ node, ...props }) => (
             <div className="overflow-x-auto my-4 rounded-lg border border-slate-200 shadow-sm">

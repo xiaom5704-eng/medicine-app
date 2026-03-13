@@ -1,26 +1,25 @@
-const callNvidiaAPI = async (messages: { role: string; content: string | any[] }[], model: string, apiKey: string) => {
+const callUnifiedAPI = async (messages: { role: string; content: string | any[] }[], system: string | undefined, model: string, apiKey: string | undefined) => {
   try {
-    const res = await fetch('/api/ai/nvidia', {
+    const payload: any = { messages };
+    if (system) payload.system = system;
+    if (apiKey) payload.apiKey = apiKey; 
+    if (model) payload.model = model;
+
+    const res = await fetch('/api/ai/chat', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        temperature: 0.2,
-        max_tokens: 1024,
-      }),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     });
+    
     if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || `NVIDIA Proxy error: ${res.status}`);
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `API error: ${res.status}`);
     }
+    
     const data = await res.json();
-    return data.choices?.[0]?.message?.content || "";
+    return data.response || "";
   } catch (e) {
-    console.error("NVIDIA API error:", e);
+    console.error("Unified API error:", e);
     throw e;
   }
 };
@@ -54,6 +53,8 @@ export const analyzeMedications = async (images: string[], targetLanguage: strin
 4. 判斷這些藥物之間是否存在交互作用（相衝）風險。
 
 注意：
+- 絕對禁止使用預設的範例資料或 Mock Data（例如：[藥品名稱]、標籤 A 等）。
+- 所有分析內容『僅能』根據圖片辨識出的 OCR 文字。若圖片模糊或無法辨識，請直接告知「無法完整辨識，請提供更清晰的照片」，不要自行猜測。
 - 在回答中絕對不要使用 ** 符號。若是需要強調重點，請使用『 』括號將重點包起來（例如：『重點內容』）。
 - 使用清晰的表格（Markdown 格式）與列表排版。
 - 不要提及任何 AI 服務名稱。`;
@@ -71,32 +72,39 @@ export const analyzeMedications = async (images: string[], targetLanguage: strin
         ]
       }
     ];
-    return await callNvidiaAPI(messages, "meta/llama-3.2-90b-vision-instruct", apiKey);
+    return await callUnifiedAPI(messages, undefined, "meta/llama-3.2-90b-vision-instruct", apiKey);
   }
 
-  // Fallback: Currently Ollama vision in this app might not be fully supported,
-  // but we try it as text-only if no image or standard prompt
+  // Fallback
   const ollamaResponse = await callOllama(`[請分析藥物圖片並翻譯為 ${targetLanguage}]\n${prompt}`);
   if (ollamaResponse) return ollamaResponse;
 
   throw new Error("請前往設定輸入 NVIDIA API 金鑰以使用強大的視覺辨識模型。");
 };
 
-export const getSymptomAdvice = async (symptoms: string, mode: 'concise' | 'detailed', apiKey?: string) => {
-  const instruction = mode === 'concise' 
-    ? "請針對以下嬰幼兒症狀提供簡潔的用藥建議。字數控制在 200 字以內。使用繁體中文。注意：絕對不要使用 ** 符號，請使用『 』括號強調重點。"
-    : "請針對以下嬰幼兒症狀提供詳細的用藥建議、病因分析與護理指南。使用繁體中文。注意：絕對不要使用 ** 符號，請使用『 』括號強調重點。";
+export const getSymptomAdvice = async (history: { role: string, content: string }[], currentSymptom: string, apiKey?: string) => {
+  const instruction = `你是一位專業的家庭醫師。請針對使用者的症狀提供建議。
+  
+  要求：
+  1. 回覆結構：請使用 --- 符號將回覆分為兩個部分。
+     第一部分是 [ 快速摘要 ]：提供 100 字以內的精簡結論與緊急處置。
+     第二部分是 [ 深度分析 ]：提供詳細的病因分析、護理指南與長期觀察建議。
+  2. 身分確認：在第一次回話時，如果你不知道患者的年齡，請務必在回答前先禮貌地詢問「請問患者的年齡是？」。
+  3. 格式：使用「條列式」與表格排版。
+  4. 禁忌：絕對禁止使用預設範本或自行生造數據。若使用者提供的資訊不足，請禮貌地請求更多細節，不要編造。絕對不要使用 ** 符號，請使用『 』括號強調重點。
+  5. 警示：若情況緊急，必須提醒立即就醫。`;
 
   if (apiKey) {
     const messages = [
-      { role: "system", content: instruction },
-      { role: "user", content: `症狀描述：${symptoms}` }
+      ...history.map(h => ({ role: h.role === 'user' ? 'user' : 'assistant', content: h.content })),
+      { role: "user", content: currentSymptom }
     ];
-    return await callNvidiaAPI(messages, "meta/llama-3.1-70b-instruct", apiKey);
+    return await callUnifiedAPI(messages, instruction, "meta/llama-3.1-70b-instruct", apiKey);
   }
 
   // Fallback to Ollama
-  const ollamaResponse = await callOllama(`${instruction}\n症狀描述：${symptoms}`);
+  const prompt = history.map(h => `${h.role === 'user' ? 'User' : 'Assistant'}: ${h.content}`).join('\n') + `\nUser: ${currentSymptom}`;
+  const ollamaResponse = await callOllama(prompt, instruction);
   if (ollamaResponse) return ollamaResponse;
 
   throw new Error("無法連線至本地 Ollama，建議輸入 NVIDIA API 金鑰。");
@@ -107,14 +115,10 @@ export const chatWithAI = async (history: { role: string, content: string }[], m
 
   if (apiKey) {
     const messages = [
-      { role: "system", content: systemInstruction },
-      ...history.map(h => ({
-        role: h.role === 'user' ? 'user' : 'assistant',
-        content: h.content
-      })),
+      ...history.map(h => ({ role: h.role === 'user' ? 'user' : 'assistant', content: h.content })),
       { role: "user", content: message }
     ];
-    return await callNvidiaAPI(messages, "meta/llama-3.1-70b-instruct", apiKey);
+    return await callUnifiedAPI(messages, systemInstruction, "meta/llama-3.1-70b-instruct", apiKey);
   }
 
   // Fallback to Ollama
@@ -135,10 +139,10 @@ AI：${aiResponse}
   if (apiKey) {
     try {
       const messages = [{ role: "user", content: prompt }];
-      const title = await callNvidiaAPI(messages, "meta/llama-3.1-8b-instruct", apiKey);
+      const title = await callUnifiedAPI(messages, undefined, "meta/llama-3.1-8b-instruct", apiKey);
       return title.trim();
     } catch (e) {
-      console.error("NVIDIA API title error", e);
+      console.error("API title error", e);
       return "新對話";
     }
   }

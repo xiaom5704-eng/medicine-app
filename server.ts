@@ -4,6 +4,13 @@ import path from "path";
 import { fileURLToPath } from "url";
 import Database from "better-sqlite3";
 import fs from "fs/promises";
+import "dotenv/config";
+
+// ─── Configuration ────────────────────────────────────────────────────────────
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+const OLLAMA_URL = process.env.OLLAMA_API_BASE_URL || "http://localhost:11434";
+const NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
+const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -77,7 +84,7 @@ function rateLimitMiddleware(req: express.Request, res: express.Response, next: 
 
 async function startServer() {
   const app = express();
-  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+  // PORT is now defined in Configuration section at top
 
   // ─── Security headers ─────────────────────────────────────────────────────
   app.use((_req, res, next) => {
@@ -96,10 +103,20 @@ async function startServer() {
 
   // ─── Sessions ─────────────────────────────────────────────────────────────
   app.get("/api/sessions", (_req, res) => {
-    const sessions = db.prepare(
-      "SELECT * FROM sessions ORDER BY is_pinned DESC, created_at DESC"
-    ).all();
-    res.json(sessions);
+    try {
+      const dbSessions = db.prepare(
+        "SELECT * FROM sessions ORDER BY is_pinned DESC, created_at DESC"
+      ).all() as any[];
+      
+      const safeSessions = dbSessions.map(session => ({
+        ...session,
+        title: session.title || '未命名對話' // Fallback for null titles
+      }));
+      res.json(safeSessions);
+    } catch (error) {
+      console.error("Failed to fetch sessions:", error);
+      res.status(500).json({ error: "Failed to fetch sessions" });
+    }
   });
 
   app.post("/api/sessions", (req, res) => {
@@ -137,9 +154,16 @@ async function startServer() {
     const sessionId = req.params.id;
     if (!isValidId(sessionId)) return res.status(400).json({ error: "Invalid session ID" });
 
-    db.prepare("DELETE FROM messages WHERE session_id = ?").run(sessionId);
-    db.prepare("DELETE FROM sessions WHERE id = ?").run(sessionId);
-    res.json({ success: true });
+    try {
+      db.transaction(() => {
+        db.prepare("DELETE FROM messages WHERE session_id = ?").run(sessionId);
+        db.prepare("DELETE FROM sessions WHERE id = ?").run(sessionId);
+      })();
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete session failed:", error);
+      res.status(500).json({ error: "Failed to delete session" });
+    }
   });
 
   // ─── Messages ─────────────────────────────────────────────────────────────
@@ -147,10 +171,20 @@ async function startServer() {
     const sessionId = req.params.sessionId;
     if (!isValidId(sessionId)) return res.status(400).json({ error: "Invalid session ID" });
 
-    const messages = db.prepare(
-      "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC"
-    ).all(sessionId);
-    res.json(messages);
+    try {
+      const dbMessages = db.prepare(
+        "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC"
+      ).all(sessionId) as any[];
+
+      const safeMessages = dbMessages.map(msg => ({
+        ...msg,
+        content: msg.content || ' ' // Fallback for null database content
+      }));
+      res.json(safeMessages);
+    } catch (error) {
+      console.error("Failed to fetch messages:", error);
+      res.status(500).json({ error: "Failed to fetch messages" });
+    }
   });
 
   app.post("/api/messages", (req, res) => {
@@ -165,21 +199,27 @@ async function startServer() {
       "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)"
     ).run(session_id, role, content);
 
-    // Auto-generate title on first assistant reply
+    // Auto-generate title on assistant's first reply (the 2nd message in session)
     if (role === 'assistant') {
-      const msgCount = (db.prepare(
-        "SELECT COUNT(*) as cnt FROM messages WHERE session_id = ?"
-      ).get(session_id) as any).cnt;
+      try {
+        const row = db.prepare(
+          "SELECT COUNT(*) as cnt FROM messages WHERE session_id = ?"
+        ).get(session_id) as { cnt: number } | undefined;
 
-      if (msgCount === 2) {
-        const session = db.prepare(
-          "SELECT is_manual_title FROM sessions WHERE id = ?"
-        ).get(session_id) as any;
+        if (row?.cnt === 2) {
+          const session = db.prepare(
+            "SELECT is_manual_title FROM sessions WHERE id = ?"
+          ).get(session_id) as { is_manual_title: number } | undefined;
 
-        if (session && !session.is_manual_title) {
-          const apiKey = process.env.NVIDIA_API_KEY || '';
-          generateChatTitle(session_id, apiKey).catch(console.error);
+          if (session && !session.is_manual_title) {
+            const apiKey = process.env.NVIDIA_API_KEY || '';
+            generateChatTitle(session_id, apiKey).catch(err => 
+              console.error(`[TitleGen] Background task failed for ${session_id}:`, err)
+            );
+          }
         }
+      } catch (err) {
+        console.error("[TitleGen] Pre-check failed:", err);
       }
     }
 
@@ -201,7 +241,7 @@ async function startServer() {
       let title = "";
 
       if (apiKey) {
-        const response = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+        const response = await fetch(NVIDIA_API_URL, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -216,20 +256,25 @@ async function startServer() {
         });
         if (response.ok) {
           const data = await response.json();
-          title = data.choices[0]?.message?.content?.trim().replace(/[「」『』""]/g, '') ?? '';
+          const content = data.choices?.[0]?.message?.content;
+          if (typeof content === 'string') {
+            title = content.trim().replace(/[「」『』""]/g, '');
+          }
         }
       }
 
       if (!title) {
-        const ollamaUrl = process.env.OLLAMA_API_BASE_URL || "http://localhost:11434";
-        const response = await fetch(`${ollamaUrl}/api/generate`, {
+        const response = await fetch(`${OLLAMA_URL}/api/generate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ model: "llama3.2:3b", prompt, stream: false }),
         });
         if (response.ok) {
           const data = await response.json();
-          title = data.response?.trim().replace(/[「」『』""]/g, '') ?? '';
+          const content = data.response;
+          if (typeof content === 'string') {
+            title = content.trim().replace(/[「」『』""]/g, '');
+          }
         }
       }
 
@@ -271,18 +316,16 @@ async function startServer() {
 
   // ─── Ollama status ────────────────────────────────────────────────────────
   app.get("/api/ai/ollama/status", async (_req, res) => {
-    const ollamaUrl = process.env.OLLAMA_API_BASE_URL || "http://localhost:11434";
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 2000);
-      const [verRes] = await Promise.all([
-        fetch(`${ollamaUrl}/api/version`, { signal: controller.signal }),
-        fetch(`${ollamaUrl}/api/tags`,   { signal: controller.signal })
-      ]);
+      
+      const response = await fetch(`${OLLAMA_URL}/api/tags`, { signal: controller.signal });
       clearTimeout(timeoutId);
-      if (verRes.ok) {
-        const verData = await verRes.json();
-        res.json({ status: "online", version: verData.version });
+      
+      if (response.ok) {
+        // Just verify connectivity; we can also return tags or version if needed
+        res.json({ status: "online" });
       } else {
         res.json({ status: "offline" });
       }
@@ -326,6 +369,14 @@ async function startServer() {
     }
   });
 
+  // ─── NVIDIA Compatibility Route ───────────────────────────────────────────
+  // Proxy older frontends calling /api/ai/nvidia to the unified chat logic
+  app.post("/api/ai/nvidia", (req, res) => {
+    // Simply redirect/re-route to the unified chat handler
+    req.url = '/api/ai/chat';
+    app._router.handle(req, res, () => {});
+  });
+
   // ─── Groq proxy ───────────────────────────────────────────────────────────
   app.post("/api/ai/groq", async (req, res) => {
     const groqApiKey = process.env.GROQ_API_KEY;
@@ -358,9 +409,9 @@ async function startServer() {
       }
       const data = await response.json();
       res.json({ response: data.choices[0]?.message?.content || "", provider: "groq" });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Groq error:", error);
-      res.status(503).json({ error: "Groq service unavailable" });
+      res.status(503).json({ error: error.message || "Groq service unavailable" });
     }
   });
 
@@ -370,8 +421,21 @@ async function startServer() {
     const groqApiKey = process.env.GROQ_API_KEY;
     const nvidiaKey  = process.env.NVIDIA_API_KEY;
 
-    if (!isValidString(req.body.prompt, 8_000)) {
-      return res.status(400).json({ error: "Prompt too long or missing" });
+    // Handle both old 'prompt' string and new 'messages' array formats
+    const messages = req.body.messages || [];
+    let textPrompt = req.body.prompt || "";
+    
+    // If no explicit prompt string, try to extract from the last user message
+    if (!textPrompt && messages.length > 0) {
+      const lastMsg = messages[messages.length - 1];
+      textPrompt = typeof lastMsg.content === 'string' 
+        ? lastMsg.content 
+        : (lastMsg.content.find((c: any) => c.type === 'text')?.text || "");
+    }
+
+    // Safety: prevent obvious abuse, but allow large image payloads in 'messages' array
+    if (!textPrompt && messages.length === 0) {
+      return res.status(400).json({ error: "No prompt or messages provided" });
     }
 
     // 1. Try Ollama first (local, fastest, free)
@@ -382,12 +446,13 @@ async function startServer() {
       clearTimeout(timeoutId);
 
       if (statusRes.ok) {
+        // Ollama usually takes string prompts. We pass the extracted text.
         const genRes = await fetch(`${ollamaUrl}/api/generate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             model: "llama3.2:3b",
-            prompt: req.body.prompt,
+            prompt: textPrompt.substring(0, 8000), 
             stream: false,
             system: typeof req.body.system === 'string' ? req.body.system.substring(0, 2000) : ""
           }),
@@ -402,14 +467,21 @@ async function startServer() {
     // 2. Fallback: Groq (free tier)
     if (groqApiKey) {
       try {
-        const messages = [
+        const groqMessages = messages.length > 0 ? messages : [
           ...(req.body.system ? [{ role: "system", content: req.body.system }] : []),
-          { role: "user", content: req.body.prompt }
+          { role: "user", content: textPrompt }
         ];
+        
+        // Remove image URLs from Groq as it (typically) doesn't support vision in this free endpoint
+        const safeGroqMessages = groqMessages.map((m: any) => ({
+          role: m.role,
+          content: typeof m.content === 'string' ? m.content : m.content.find((c: any) => c.type === 'text')?.text || "IMAGE_OMITTED"
+        }));
+
         const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${groqApiKey}` },
-          body: JSON.stringify({ model: "llama-3.1-8b-instant", messages, temperature: 0.7, max_tokens: 2048 }),
+          body: JSON.stringify({ model: req.body.model || "llama-3.1-8b-instant", messages: safeGroqMessages, temperature: 0.7, max_tokens: 2048 }),
         });
         if (groqRes.ok) {
           const data = await groqRes.json();
@@ -421,23 +493,31 @@ async function startServer() {
     // 3. Fallback: NVIDIA NIM
     if (nvidiaKey) {
       try {
-        const messages = [
+        const nvMessages = messages.length > 0 ? messages : [
           ...(req.body.system ? [{ role: "system", content: req.body.system }] : []),
-          { role: "user", content: req.body.prompt }
+          { role: "user", content: textPrompt }
         ];
+        
+        const nvModel = req.body.model || (messages.some((m: any) => Array.isArray(m.content) && m.content.some((c: any) => c.type === 'image_url')) 
+          ? "meta/llama-3.2-90b-vision-instruct" 
+          : "meta/llama-3.1-8b-instruct");
+
         const nvRes = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${nvidiaKey}` },
-          body: JSON.stringify({ model: "meta/llama-3.1-8b-instruct", messages, temperature: 0.7, max_tokens: 2048 }),
+          body: JSON.stringify({ model: nvModel, messages: nvMessages, temperature: 0.7, max_tokens: 2048 }),
         });
+        
         if (nvRes.ok) {
           const data = await nvRes.json();
           return res.json({ response: data.choices[0]?.message?.content || "", provider: "nvidia" });
+        } else {
+           console.error("NVIDIA API failed:", await nvRes.text());
         }
       } catch (_) { /* NVIDIA unavailable */ }
     }
 
-    return res.status(503).json({ error: "All AI services unavailable" });
+    return res.status(503).json({ error: "All AI services unavailable or timed out" });
   });
 
   // ─── README viewer ────────────────────────────────────────────────────────
@@ -459,8 +539,9 @@ async function startServer() {
   });
 
   // ─── Vite dev / production static ────────────────────────────────────────
+  let vite: any;
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
+    vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
@@ -473,9 +554,15 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
+
+  if (vite) {
+    server.on('upgrade', (req, socket, head) => {
+      vite.ws.handleUpgrade(req, socket, head);
+    });
+  }
 }
 
 startServer();

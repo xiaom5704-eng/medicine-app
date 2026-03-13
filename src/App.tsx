@@ -26,6 +26,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Session, Message, MedicationFile } from './types';
 import { analyzeMedications, getSymptomAdvice, chatWithAI, generateTitleSummary } from './services/gemini';
 import MarkdownRenderer from './components/MarkdownRenderer';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { useSpeechRecognition, useSpeechSynthesis } from './hooks/useSpeech';
 
 export default function App() {
@@ -50,9 +51,11 @@ export default function App() {
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
   const [showReadme, setShowReadme] = useState(false);
   const [readmeContent, setReadmeContent] = useState('');
-  const [nvidiaStatus, setNvidiaStatus] = useState<'idle' | 'valid' | 'invalid' | 'verifying'>(
+  const [nvidiaStatus, setNvidiaStatus] = useState<'idle' | 'verifying' | 'valid' | 'invalid'>(
     localStorage.getItem('nvidia_api_key') ? 'valid' : 'idle'
   );
+  const [isFlashing, setIsFlashing] = useState(false);
+  const [activeSymptomTab, setActiveSymptomTab] = useState<'quick' | 'deep'>('quick');
   const [isVerifyingKey, setIsVerifyingKey] = useState(false);
   const [keyError, setKeyError] = useState('');
   const [hasAcceptedDisclaimer, setHasAcceptedDisclaimer] = useState(() => {
@@ -177,20 +180,24 @@ export default function App() {
   const fetchSessions = async () => {
     try {
       const res = await fetch('/api/sessions');
+      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
       const data = await res.json();
-      setSessions(data);
+      setSessions(Array.isArray(data) ? data : []);
     } catch (e) {
-      console.error("Failed to fetch sessions", e);
+      console.error("Failed to fetch sessions:", e);
+      // Keep existing sessions or set empty if critical
     }
   };
 
   const fetchMessages = async (id: string) => {
     try {
       const res = await fetch(`/api/messages/${id}`);
+      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
       const data = await res.json();
-      setMessages(data);
+      setMessages(Array.isArray(data) ? data : []);
     } catch (e) {
-      console.error("Failed to fetch messages", e);
+      console.error("Failed to fetch messages:", e);
+      setMessages([]); // Clear messages on failure to prevent stale data
     }
   };
 
@@ -198,16 +205,19 @@ export default function App() {
     const id = Date.now().toString();
     const title = `新對話 ${new Date().toLocaleString('zh-TW', { hour: '2-digit', minute: '2-digit' })}`;
     try {
-      await fetch('/api/sessions', {
+      const res = await fetch('/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id, title }),
       });
-      fetchSessions();
+      if (!res.ok) throw new Error('Failed to create session');
+      
+      await fetchSessions();
       setCurrentSessionId(id);
       setActiveTab('chat');
     } catch (e) {
-      console.error("Failed to create session", e);
+      console.error("Failed to create session:", e);
+      alert("無法建立新對話，請檢查網路連線。");
     }
   };
 
@@ -240,7 +250,7 @@ export default function App() {
   const openRenameDialog = (session: Session, e: React.MouseEvent) => {
     e.stopPropagation();
     setRenamingSession(session);
-    setNewTitle(session.title);
+    setNewTitle(session.title || '');
     setIsRenameDialogOpen(true);
     setActiveMenuId(null);
   };
@@ -293,7 +303,9 @@ export default function App() {
         body: JSON.stringify(aiMsg),
       });
 
-      setMessages(prev => [...prev, aiMsg]);
+      // No need to setMessages(prev => [...prev, aiMsg]) here if polling is active, 
+      // or we can just fetch the latest from server to be sure.
+      await fetchMessages(currentSessionId);
 
       // Auto-titling logic
       const currentSession = sessions.find(s => s.id === currentSessionId);
@@ -354,7 +366,7 @@ export default function App() {
       }
     } catch (err) {
       console.error("Error accessing camera:", err);
-      alert("無法啟動相機，請檢查權限設定。");
+      alert("無法啟動相機，請檢查權限設定或裝置連線。");
       setShowCamera(false);
     }
   };
@@ -368,6 +380,11 @@ export default function App() {
   };
 
   const takePhoto = () => {
+    if (medFiles.length >= 4) {
+      alert("已達到圖片數量上限（最多 4 張），請先移除部分圖片再拍照。");
+      stopCamera();
+      return;
+    }
     if (videoRef.current && canvasRef.current) {
       const video = videoRef.current;
       const canvas = canvasRef.current;
@@ -376,14 +393,34 @@ export default function App() {
       const ctx = canvas.getContext('2d');
       if (ctx) {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL('image/jpeg');
-        setMedFiles(prev => [...prev, {
-          id: Math.random().toString(36).substr(2, 9),
-          preview: dataUrl,
-          name: `相機拍攝_${new Date().getTime()}.jpg`
-        }]);
-        stopCamera();
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+        
+        // Visual feedback
+        setIsFlashing(true);
+        setTimeout(() => setIsFlashing(false), 150);
+
+        setMedFiles(prev => {
+          const newFiles = [...prev, {
+            id: Math.random().toString(36).substr(2, 9),
+            preview: dataUrl,
+            name: `現場拍攝_${new Date().getTime()}.jpg`
+          }];
+          return newFiles;
+        });
+
+        // Small delay before closing and analysis to show feedback
+        setTimeout(() => {
+          stopCamera();
+          setActiveTab('medication');
+          // Start analysis automatically if it's the first photo
+          if (medFiles.length === 0) {
+            handleAnalyzeMedications();
+          }
+        }, 300);
       }
+    } else {
+      console.error("Capture failed: ref missing", { video: !!videoRef.current, canvas: !!canvasRef.current });
+      alert("拍照失敗，請重啟功能。");
     }
   };
 
@@ -421,6 +458,8 @@ export default function App() {
       setMessages(prev => [...prev, aiMsg]);
       setActiveTab('chat');
       setMedFiles([]);
+      // Force fetch to ensure state sync
+      fetchMessages(sessionId);
     } catch (error) {
       console.error(error);
     } finally {
@@ -428,32 +467,44 @@ export default function App() {
     }
   };
 
+  const [symptomInput, setSymptomInput] = useState('');
   const handleSymptomSubmit = async (symptoms: string) => {
     if (!symptoms.trim()) return;
     setIsLoading(true);
-    setSymptomResult(null);
+    
+    // Use currentSessionId if available, or create a new one for symptoms
+    let sessionId = currentSessionId;
+    if (!sessionId) {
+      sessionId = Date.now().toString();
+      const title = `症狀諮詢 ${new Date().toLocaleString('zh-TW', { hour: '2-digit', minute: '2-digit' })}`;
+      await fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: sessionId, title }),
+      });
+      fetchSessions();
+      setCurrentSessionId(sessionId);
+    }
+
+    const userMsg: Message = { session_id: sessionId, role: 'user', content: symptoms };
+    setMessages(prev => [...prev, userMsg]);
+    setSymptomInput('');
 
     try {
-      const result = await getSymptomAdvice(symptoms, symptomMode, userApiKey);
+      // Save user message
+      await fetch('/api/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(userMsg),
+      });
+
+      const result = await getSymptomAdvice(messages, symptoms, userApiKey);
       setSymptomResult(result);
-      
-      let sessionId = currentSessionId;
-      if (!sessionId) {
-        sessionId = Date.now().toString();
-        const title = `症狀諮詢 ${new Date().toLocaleString('zh-TW', { hour: '2-digit', minute: '2-digit' })}`;
-        await fetch('/api/sessions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: sessionId, title }),
-        });
-        fetchSessions();
-        setCurrentSessionId(sessionId);
-      }
 
       const aiMsg: Message = { 
         session_id: sessionId, 
         role: 'assistant', 
-        content: `### 症狀建議 (${symptomMode === 'concise' ? '簡潔' : '詳細'})\n\n${result}` 
+        content: result 
       };
       
       await fetch('/api/messages', {
@@ -461,17 +512,20 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(aiMsg),
       });
-      setMessages(prev => [...prev, aiMsg]);
-
-    } catch (error) {
-      console.error(error);
+      
+      await fetchMessages(sessionId);
+    } catch (error: any) {
+      console.error(`[症狀諮詢錯誤] 檔案: App.tsx, 訊息: ${error.message}`);
+      console.error('Stack trace:', error.stack);
+      alert("諮詢過程發生錯誤，請稍後再試。");
     } finally {
       setIsLoading(false);
     }
   };
 
   return (
-    <div className="flex h-screen bg-[#F8FAFC] text-slate-800 font-sans">
+    <ErrorBoundary>
+      <div className="flex h-screen bg-[#F8FAFC] text-slate-800 font-sans">
       {/* Sidebar */}
       <motion.aside 
         initial={false}
@@ -499,7 +553,9 @@ export default function App() {
                 {!!session.is_pinned && (
                   <Pin size={14} className="text-emerald-600 fill-emerald-600 shrink-0" />
                 )}
-                <span className="truncate text-sm font-medium">{session.title}</span>
+                <span className="truncate text-sm font-medium">
+                  {session.title || '未命名對話'}
+                </span>
               </div>
               
               <div className="flex items-center gap-1">
@@ -625,7 +681,11 @@ export default function App() {
                               {speakingId === i ? <VolumeX size={14} /> : <Volume2 size={14} />}
                             </button>
                           )}
-                          <div className={`max-w-[85%] p-4 rounded-2xl shadow-sm ${msg.role === 'user' ? 'bg-emerald-600 text-white rounded-tr-none' : 'bg-white border border-slate-100 rounded-tl-none'}`}><MarkdownRenderer content={msg.content} /></div>
+                          <div className={`max-w-[85%] p-4 rounded-2xl shadow-sm ${msg.role === 'user' ? 'bg-emerald-600 text-white rounded-tr-none' : 'bg-white border border-slate-100 rounded-tl-none'}`}>
+                            <ErrorBoundary fallbackContent={msg.content || '未提供內容'}>
+                              <MarkdownRenderer content={msg.content || ' '} />
+                            </ErrorBoundary>
+                          </div>
                         </div>
                       ))}
                       {isLoading && <div className="flex justify-start"><div className="bg-white border border-slate-100 p-4 rounded-2xl flex items-center gap-2"><Loader2 size={16} className="animate-spin text-emerald-600" /><span className="text-sm text-slate-500">正在分析中...</span></div></div>}
@@ -647,28 +707,132 @@ export default function App() {
                         </div>
                       ))}
                       {medFiles.length < 4 && (
-                        <button onClick={startCamera} className="aspect-video rounded-xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center gap-2 hover:bg-emerald-50 text-slate-400 hover:text-emerald-600"><Camera size={32} /><span>拍照</span></button>
+                        <>
+                          <input
+                            type="file"
+                            ref={fileInputRef}
+                            onChange={handleFileUpload}
+                            accept="image/*"
+                            multiple
+                            className="hidden"
+                          />
+                          <button onClick={() => fileInputRef.current?.click()} className="aspect-video rounded-xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center gap-2 hover:bg-emerald-50 text-slate-400 hover:text-emerald-600">
+                            <Upload size={32} />
+                            <span>上傳圖片</span>
+                          </button>
+                          <button onClick={startCamera} className="aspect-video rounded-xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center gap-2 hover:bg-emerald-50 text-slate-400 hover:text-emerald-600">
+                            <Camera size={32} />
+                            <span>拍照</span>
+                          </button>
+                        </>
                       )}
                     </div>
                     <button onClick={handleAnalyzeMedications} disabled={medFiles.length === 0 || isLoading} className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2">{isLoading ? <Loader2 className="animate-spin" /> : <Upload size={20} />}開始辨識</button>
                   </div>
                   {showCamera && (
-                    <div className="fixed inset-0 bg-black z-50 flex flex-col">
-                      <video ref={videoRef} autoPlay playsInline className="flex-1" />
-                      <div className="h-24 bg-slate-900 flex items-center justify-around"><button onClick={stopCamera} className="text-white"><X size={32} /></button><button onClick={takePhoto} className="w-16 h-16 bg-white rounded-full" /></div>
+                    <div className="fixed inset-0 bg-black z-[2000] flex flex-col items-center justify-center overflow-hidden">
+                      <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" />
+                      
+                      {/* Shutter Flash Effect */}
+                      <AnimatePresence>
+                        {isFlashing && (
+                          <motion.div 
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            exit={{ opacity: 0 }}
+                            className="absolute inset-0 bg-white z-[2500]"
+                          />
+                        )}
+                      </AnimatePresence>
+
+                      <canvas ref={canvasRef} className="hidden" />
+                      
+                      {/* Close Button */}
+                      <button 
+                        onClick={stopCamera} 
+                        className="absolute top-10 right-8 p-3 bg-black/40 text-white rounded-full z-[2200] hover:bg-black/60 transition-all backdrop-blur-md border border-white/20 pointer-events-auto"
+                      >
+                        <X size={32} />
+                      </button>
+
+                      {/* Capture Button Container */}
+                      <div className="absolute bottom-16 flex items-center justify-center w-full z-[2200] pointer-events-none">
+                        <button 
+                          onClick={takePhoto} 
+                          className="w-24 h-24 bg-white border-[6px] border-slate-200/50 rounded-full shadow-[0_0_30px_rgba(255,255,255,0.4)] active:scale-90 transition-all pointer-events-auto flex items-center justify-center"
+                        >
+                          <div className="w-16 h-16 bg-white border-2 border-slate-100 rounded-full" />
+                        </button>
+                      </div>
+                      <div className="absolute bottom-6 text-white/60 text-xs font-medium z-[2200]">請對準藥物標籤拍照</div>
                     </div>
                   )}
                 </motion.div>
               )}
 
-              {activeTab === 'symptoms' && (
-                <motion.div key="symptoms" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex-1 flex flex-col items-center">
-                  <div className="w-full max-w-2xl bg-white p-8 rounded-3xl shadow-xl border border-slate-100 mb-6">
-                    <h2 className="text-2xl font-bold text-center mb-4">智慧醫療助理</h2>
-                    <textarea className="w-full h-32 p-4 bg-slate-50 border rounded-2xl outline-none mb-4" placeholder="描述您的症狀..." id="symptomInput" />
-                    <button onClick={() => { const val = (document.getElementById('symptomInput') as HTMLTextAreaElement).value; handleSymptomSubmit(val); }} disabled={isLoading} className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2">{isLoading ? <Loader2 className="animate-spin" /> : <ChevronRight size={20} />}獲取建議</button>
+               {activeTab === 'symptoms' && (
+                <motion.div key="symptoms" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex-1 flex flex-col pt-4 overflow-hidden">
+                  <div className="flex-1 overflow-y-auto space-y-6 mb-4 pr-2 custom-scrollbar pb-10">
+                    {messages.length === 0 ? (
+                      <div className="bg-white p-8 rounded-3xl shadow-sm border border-slate-100 max-w-2xl mx-auto mt-10">
+                        <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center text-emerald-600 mx-auto mb-4">
+                          <Stethoscope size={30} />
+                        </div>
+                        <h2 className="text-xl font-bold text-center mb-2">開始您的症狀諮詢</h2>
+                        <p className="text-slate-500 text-center text-sm mb-6">請描述您的症狀，醫師將為您提供即時建議。</p>
+                        <div className="bg-blue-50 p-4 rounded-xl border border-blue-100 mb-6">
+                          <p className="text-[11px] text-blue-700 leading-relaxed font-medium">注意：系統會根據您的描述提供建議。如果是第一次對話，且未提供年齡，醫師將會主動詢問您以提供準確方案。</p>
+                        </div>
+                      </div>
+                    ) : (
+                      messages.map((msg, i) => {
+                        const parts = msg.content.split('---');
+                        const hasTabs = parts.length >= 2 && msg.role === 'assistant';
+
+                        return (
+                          <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} items-end gap-2`}>
+                            <div className={`max-w-[90%] p-4 rounded-2xl shadow-sm ${msg.role === 'user' ? 'bg-emerald-600 text-white rounded-tr-none' : 'bg-white text-slate-800 border border-slate-100 rounded-tl-none'}`}>
+                              {hasTabs && (
+                                <div className="flex bg-slate-100 p-1 rounded-xl mb-4 w-fit">
+                                  <button onClick={() => setActiveSymptomTab('quick')} className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${activeSymptomTab === 'quick' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>{parts.length >= 2 ? '快速摘要' : '完整回覆'}</button>
+                                  {parts.length >= 2 && (
+                                    <button onClick={() => setActiveSymptomTab('deep')} className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${activeSymptomTab === 'deep' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>詳細分析</button>
+                                  )}
+                                </div>
+                              )}
+                              <ErrorBoundary fallbackContent={msg.content}>
+                                <MarkdownRenderer content={hasTabs ? (activeSymptomTab === 'quick' ? parts[0] : (parts[1] || parts[0])) : msg.content} />
+                              </ErrorBoundary>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                    {isLoading && <div className="flex justify-start"><div className="bg-white border border-emerald-100 p-4 rounded-2xl flex items-center gap-2"><Loader2 size={16} className="animate-spin text-emerald-600" /><span className="text-sm text-slate-500">醫師正在診斷中...</span></div></div>}
+                    <div ref={messagesEndRef} />
                   </div>
-                  {symptomResult && <div className="w-full max-w-2xl bg-white p-6 rounded-2xl shadow-lg border border-emerald-100"><MarkdownRenderer content={symptomResult} /></div>}
+
+                  <div className="bg-white p-4 rounded-3xl shadow-xl border border-slate-100 flex items-end gap-3 max-w-3xl mx-auto w-full mb-6">
+                    <textarea 
+                      className="flex-1 bg-slate-50 border-none rounded-2xl p-3 text-sm focus:ring-2 focus:ring-emerald-500 min-h-[44px] max-h-32 outline-none resize-none"
+                      placeholder="請輸入症狀或追蹤問題..."
+                      value={symptomInput}
+                      onChange={(e) => setSymptomInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          handleSymptomSubmit(symptomInput);
+                        }
+                      }}
+                    />
+                    <button 
+                      onClick={() => handleSymptomSubmit(symptomInput)}
+                      disabled={!symptomInput.trim() || isLoading}
+                      className="bg-emerald-600 text-white p-3 rounded-2xl disabled:bg-slate-200 transition-all hover:bg-emerald-700 shadow-lg shadow-emerald-200 shrink-0"
+                    >
+                      {isLoading ? <Loader2 className="animate-spin" size={20} /> : <Send size={20} />}
+                    </button>
+                  </div>
                 </motion.div>
               )}
             </AnimatePresence>
@@ -737,7 +901,11 @@ export default function App() {
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} onClick={() => setShowReadme(false)} className="absolute inset-0 bg-black/40" />
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="relative bg-white w-full max-w-4xl max-h-[80vh] rounded-3xl overflow-hidden flex flex-col p-6">
               <div className="flex justify-between items-center mb-4"><h2 className="text-xl font-bold">使用指南</h2><button onClick={() => setShowReadme(false)}><X /></button></div>
-              <div className="flex-1 overflow-y-auto"><MarkdownRenderer content={readmeContent} /></div>
+              <div className="flex-1 overflow-y-auto">
+                <ErrorBoundary fallbackContent={readmeContent}>
+                  <MarkdownRenderer content={readmeContent || ' '} />
+                </ErrorBoundary>
+              </div>
             </motion.div>
           </div>
         )}
@@ -757,6 +925,7 @@ export default function App() {
           </div>
         )}
       </AnimatePresence>
-    </div>
+      </div>
+    </ErrorBoundary>
   );
 }
