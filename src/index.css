@@ -1,5 +1,5 @@
-@import "tailwindcss";
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
 
 @theme {
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
@@ -24,4 +24,15 @@ body {
 
 .prose p {
   @apply leading-relaxed;
+}
+
+/* Breathing Light Animation */
+@keyframes breathe {
+  0% { opacity: 0.6; transform: scale(0.95); }
+  50% { opacity: 1; transform: scale(1.05); }
+  100% { opacity: 0.6; transform: scale(0.95); }
+}
+
+.animate-breathe {
+  animation: breathe 2s ease-in-out infinite;
 }

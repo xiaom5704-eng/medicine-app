@@ -33,19 +33,49 @@
 
 ---
 
-## 🌐 如何部屬到雲端 (給別人用)
+## 🌐 如何部署到雲端 (給別人用)
 
-如果您希望產生一個網址讓別人直接點開使用：
+如果您希望產生一個網址讓別人直接點開使用，我們已配置好支援 **Heroku** 的部署環境。
 
-### 1. 部屬至 Google Cloud Run (推薦)
-本專案已內建 `Dockerfile`，您可以直接連接 GitHub 儲存庫至 Google Cloud Run 進行自動部屬。
+### 部署至 Heroku 的步驟
 
-### 2. 設定環境變數
-在雲端平台設定以下環境變數：
-- `GEMINI_API_KEY`: 您的 Google AI Studio 金鑰 (選填，若無 Ollama 時使用)。
+1. **註冊並安裝 Heroku CLI**：
+   請前往 [Heroku 官網](https://heroku.com/) 註冊帳號，並下載安裝 [Heroku CLI](https://devcenter.heroku.com/articles/heroku-cli)。
 
-### 3. 使用者端安裝
-使用者點開網址後，可以點擊瀏覽器網址列的「安裝」圖示，將其安裝至 Windows 或手機。
+2. **登入 Heroku**：
+   打開終端機 (Terminal 或 PowerShell)，執行：
+   ```bash
+   heroku login
+   ```
+
+3. **建立 Heroku App**：
+   在專案資源夾底下執行：
+   ```bash
+   heroku create <您自訂的App名稱(可留空由系統隨機建立)>
+   ```
+
+4. **設定環境變數**：
+   請將您從 NVIDIA 取得的 API Key 設定到 Heroku 環境變數中：
+   ```bash
+   heroku config:set NVIDIA_API_KEY="您的_NVIDIA_API_KEY"
+   ```
+
+5. **推播程式碼至 Heroku**：
+   ```bash
+   git add .
+   git commit -m "Prepare for Heroku deployment"
+   git push heroku main
+   ```
+
+6. **開啟網頁**：
+   部署完成後，執行以下指令即可自動在瀏覽器開啟您的 App：
+   ```bash
+   heroku open
+   ```
+
+> ⚠️ **溫馨提示**：
+> 部署至 Heroku 的免費版本 (EcoDynos) 或是展示版，每天都有硬性重啟的機制，且不提供持久化的檔案系統。這代表每一次重啟，您的 SQLite (`medsafe.db`) 都會被清空，**對話紀錄將無法永久保留**。
+> 使用者端可以點擊瀏覽器網址列的「安裝」圖示，將其安裝至 Windows 或手機 (PWA支援)。
 
 ---
 
