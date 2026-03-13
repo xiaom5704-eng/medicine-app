@@ -1,20 +1,61 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# 智慧醫療助理 (MedSafe AI)
 
-# Run and deploy your AI Studio app
+這是一個結合本地端 AI (Ollama) 與雲端 AI (Gemini) 的智慧醫療助理，支援藥物辨識、翻譯分析與症狀諮詢。
 
-This contains everything you need to run your app locally.
+## 🌟 特色功能
+- **混合式 AI 引擎**：優先連線本地 Ollama (Llama 3.2)，連線失敗時自動切換至 Google Gemini API。
+- **藥物辨識**：上傳藥袋或藥瓶照片，自動翻譯並分析藥物成分與風險。
+- **症狀諮詢**：提供專業的兒科醫療建議（僅供參考，緊急情況請就醫）。
+- **PWA 支援**：可安裝於 Windows 10/11 桌面或手機主畫面，像原生 App 一樣使用。
+- **隱私優先**：使用 Ollama 模式時，所有對話均在本地處理，不外傳雲端。
 
-View your app in AI Studio: https://ai.studio/apps/03e8b7f5-d403-402b-add8-f6a508e9e39d
+---
 
-## Run Locally
+## 🚀 如何在本地啟動 (推薦)
 
-**Prerequisites:**  Node.js
+如果您想在自己的電腦上免費執行 AI，請確保已安裝 **Docker**。
 
+1. **複製專案**：
+   ```bash
+   git clone <您的 GitHub 專案網址>
+   cd <專案資料夾>
+   ```
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+2. **一鍵啟動**：
+   ```bash
+   chmod +x setup.sh
+   ./setup.sh
+   ```
+
+3. **開始使用**：
+   打開瀏覽器訪問 `http://localhost:3000`。
+   *提示：第一次啟動會自動下載 Llama 3.2 模型 (約 2GB)，請耐心等候。*
+
+---
+
+## 🌐 如何部屬到雲端 (給別人用)
+
+如果您希望產生一個網址讓別人直接點開使用：
+
+### 1. 部屬至 Google Cloud Run (推薦)
+本專案已內建 `Dockerfile`，您可以直接連接 GitHub 儲存庫至 Google Cloud Run 進行自動部屬。
+
+### 2. 設定環境變數
+在雲端平台設定以下環境變數：
+- `GEMINI_API_KEY`: 您的 Google AI Studio 金鑰 (選填，若無 Ollama 時使用)。
+
+### 3. 使用者端安裝
+使用者點開網址後，可以點擊瀏覽器網址列的「安裝」圖示，將其安裝至 Windows 或手機。
+
+---
+
+## 🛠️ 技術棧
+- **Frontend**: React + Vite + Tailwind CSS + Framer Motion
+- **Backend**: Express + SQLite (Better-SQLite3)
+- **AI**: Ollama (Llama 3.2:3b) & Google Gemini API
+- **Container**: Docker & Docker Compose
+
+---
+
+## ⚠️ 免責聲明
+本程式提供的醫療建議僅供參考，不能替代專業醫生的診斷。如有緊急醫療需求，請立即撥打急救電話或前往醫院。
