@@ -49,6 +49,28 @@
 
 ---
 
+## 🖥️ 如何製作桌面版 (.exe)
+
+如果您希望將此程式打包成一個可下載的 Windows 安裝檔：
+
+1. **環境準備**：
+   - 確保您的電腦已安裝 [Node.js](https://nodejs.org/)。
+   - 下載並安裝 [Ollama](https://ollama.com/)。
+
+2. **設定 Ollama 權限 (重要)**：
+   - 為了讓桌面 App 能存取本地 AI，請先關閉 Ollama。
+   - **Windows**: 在 PowerShell 執行 `[System.Environment]::SetEnvironmentVariable('OLLAMA_ORIGINS', '*', 'User')`，然後重新啟動 Ollama。
+   - **Mac**: 執行 `launchctl setenv OLLAMA_ORIGINS "*"`，然後重新啟動 Ollama。
+
+3. **打包程式**：
+   ```bash
+   npm install
+   npm run electron:build
+   ```
+   - 打包完成後，安裝檔會出現在 `release` 資料夾中。
+
+---
+
 ## 🛠️ 技術棧
 - **Frontend**: React + Vite + Tailwind CSS + Framer Motion
 - **Backend**: Express + SQLite (Better-SQLite3)
