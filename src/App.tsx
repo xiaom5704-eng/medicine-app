@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import ReactMarkdown from 'react-markdown';
 import { 
   Plus, 
   MessageSquare, 
@@ -410,30 +411,36 @@ export default function App() {
     if (!files) return;
 
     const newFiles = Array.from(files);
+    const currentCount = medFiles.length;
+    const availableSlots = 4 - currentCount;
     
-    setMedFiles(prev => {
-      const availableSlots = 4 - prev.length;
-      if (availableSlots <= 0) return prev;
-      
-      const filesToAdd = newFiles.slice(0, availableSlots);
-      
-      filesToAdd.forEach((file: File) => {
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          setMedFiles(current => {
-            if (current.length >= 4) return current;
-            return [...current, {
-              id: Math.random().toString(36).substr(2, 9),
+    if (availableSlots <= 0) {
+      alert("最多只能上傳 4 張照片");
+      return;
+    }
+    
+    const filesToAdd = newFiles.slice(0, availableSlots);
+    
+    filesToAdd.forEach((file: File) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        if (reader.result) {
+          setMedFiles(prev => {
+            // Re-check limit inside the setter for thread-safety/async consistency
+            if (prev.length >= 4) return prev;
+            return [...prev, {
+              id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
               preview: reader.result as string,
               name: file.name
             }];
           });
-        };
-        reader.readAsDataURL(file);
-      });
-      
-      return prev;
+        }
+      };
+      reader.readAsDataURL(file);
     });
+
+    // Reset the input value so the same file can be selected again if removed
+    e.target.value = '';
   };
 
   const removeFile = (id: string) => {
@@ -1110,10 +1117,8 @@ export default function App() {
                                 </button>
                               </div>
                             )}
-                            <div className="prose prose-slate max-w-none prose-sm">
-                              {msg.content.split('\n').map((line, j) => (
-                                <p key={j} className="mb-1">{line}</p>
-                              ))}
+                            <div className="prose prose-slate max-w-none prose-sm prose-p:my-1 prose-headings:mb-2 prose-headings:mt-4 prose-ul:my-2 prose-li:my-0">
+                              <ReactMarkdown>{msg.content}</ReactMarkdown>
                             </div>
                           </div>
                         </div>

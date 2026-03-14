@@ -38,7 +38,14 @@
 如果您希望產生一個網址讓別人直接點開使用：
 
 ### 1. 部屬至 Google Cloud Run (推薦)
-本專案已內建 `Dockerfile`，您可以直接連接 GitHub 儲存庫至 Google Cloud Run 進行自動部屬。
+本專案已內建 `Dockerfile` 與 GitHub Actions 流程，您可以輕鬆完成自動化部屬。
+
+**設定步驟：**
+1. 將專案推送到 GitHub。
+2. 在 GitHub Repository 的 `Settings > Secrets and variables > Actions` 中設定以下 Secrets：
+   - `GCP_PROJECT_ID`: 您的 Google Cloud 專案 ID。
+   - `GCP_SA_KEY`: 具有 Cloud Run 部署權限的 Service Account 金鑰 (JSON 格式)。
+3. 每當推送到 `main` 分支時，GitHub Actions 會自動建置 Docker 映像檔並部署至 Cloud Run。
 
 ### 2. 設定環境變數
 在雲端平台設定以下環境變數：
