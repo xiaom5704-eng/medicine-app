@@ -1,28 +1,7 @@
-const callUnifiedAPI = async (messages: { role: string; content: string | any[] }[], system: string | undefined, model: string, apiKey: string | undefined, mode?: string) => {
-  try {
-    const payload: any = { messages };
-    if (mode) payload.mode = mode;
-    if (system) payload.system = system;
-    if (apiKey) payload.apiKey = apiKey; 
-    if (model) payload.model = model;
+import { GoogleGenAI, Type } from "@google/genai";
 
-    const res = await fetch('/api/ai/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || `API error: ${res.status}`);
-    }
-    
-    const data = await res.json();
-    return data.response || "";
-  } catch (e) {
-    console.error("Unified API error:", e);
-    throw e;
-  }
+const getGeminiClient = (apiKey?: string) => {
+  return new GoogleGenAI({ apiKey: apiKey || process.env.GEMINI_API_KEY || "" });
 };
 
 const callOllama = async (prompt: string, system?: string) => {
@@ -41,7 +20,16 @@ const callOllama = async (prompt: string, system?: string) => {
 };
 
 export const analyzeMedications = async (images: string[], targetLanguage: string = "繁體中文", apiKey?: string) => {
-  const prompt = `你是一位專業的藥劑師與翻譯專家。請分析以下藥物照片或文件中的資訊。
+  // Ollama usually doesn't support vision as well as Gemini in 3b models, 
+  // so we might want to stick to Gemini for vision or use a vision-capable Ollama model.
+  // For this requirement, we'll try Ollama if it's just text, but images need Gemini.
+  const ai = getGeminiClient(apiKey);
+  const model = ai.models.generateContent({
+    model: "gemini-3.1-pro-preview",
+    contents: [
+      {
+        parts: [
+          { text: `你是一位專業的藥劑師與翻譯專家。請分析以下藥物照片或文件中的資訊。
           
 要求：
 1. 辨識圖片中的所有文字，包含各國語言（如日文、英文、德文等）。
@@ -54,80 +42,99 @@ export const analyzeMedications = async (images: string[], targetLanguage: strin
 4. 判斷這些藥物之間是否存在交互作用（相衝）風險。
 
 注意：
-- 絕對禁止使用預設的範例資料或 Mock Data（例如：[藥品名稱]、標籤 A 等）。
-- 所有分析內容『僅能』根據圖片辨識出的 OCR 文字。若圖片模糊或無法辨識，請直接告知「無法完整辨識，請提供更清晰的照片」，不要自行猜測。
-- 在回答中絕對不要使用 ** 符號。若是需要強調重點，請使用『 』括號將重點包起來（例如：『重點內容』）。
-- 使用清晰的表格（Markdown 格式）與列表排版。
-- 不要提及任何 AI 服務名稱。`;
-
-  if (apiKey) {
-    const messages = [
-      {
-        role: "user",
-        content: [
-          { type: "text", text: prompt },
+- 回答中絕對不要使用 ** 符號進行加粗。
+- 使用清晰的換行與列表排版。
+- 不要提及任何 AI 服務名稱。` },
           ...images.map(img => ({
-            type: "image_url",
-            image_url: { url: img }
+            inlineData: {
+              mimeType: "image/jpeg",
+              data: img.split(',')[1]
+            }
           }))
         ]
       }
-    ];
-    return await callUnifiedAPI(messages, undefined, "meta/llama-3.2-90b-vision-instruct", apiKey);
-  }
+    ]
+  });
 
-  // Fallback
-  const ollamaResponse = await callOllama(`[請分析藥物圖片並翻譯為 ${targetLanguage}]\n${prompt}`);
-  if (ollamaResponse) return ollamaResponse;
-
-  throw new Error("請前往設定輸入 NVIDIA API 金鑰以使用強大的視覺辨識模型。");
+  const response = await model;
+  return response.text;
 };
 
-export const getSymptomAdvice = async (history: { role: string, content: string }[], currentSymptom: string, apiKey?: string) => {
-  const instruction = `你是一位專業的家庭醫師。請針對使用者的症狀提供建議。
-  
-  要求：
-  1. 回覆結構：請使用 --- 符號將回覆分為兩個部分。
-     第一部分是 [ 快速摘要 ]：提供 100 字以內的精簡結論與緊急處置。
-     第二部分是 [ 深度分析 ]：提供詳細的病因分析、護理指南與長期觀察建議。
-  2. 身分確認：在第一次回話時，如果你不知道患者的年齡，請務必在回答前先禮貌地詢問「請問患者的年齡是？」。
-  3. 格式：使用「條列式」與表格排版。
-  4. 禁忌：絕對禁止使用預設範本或自行生造數據。若使用者提供的資訊不足，請禮貌地請求更多細節，不要編造。絕對不要使用 ** 符號，請使用『 』括號強調重點。
-  5. 警示：若情況緊急，必須提醒立即就醫。`;
+export const getSymptomAdvice = async (symptoms: string, mode: 'concise' | 'detailed', apiKey?: string) => {
+  const instruction = mode === 'concise' 
+    ? "請針對以下嬰兒症狀提供簡潔的用藥建議與注意事項。字數控制在 200 字以內。使用繁體中文。如果使用者沒有提供嬰幼兒的年齡，請在建議中先提醒「不同年齡的處置方式不同，建議您提供孩子的年齡以獲取更準確的資訊」。注意：回答中絕對不要使用 ** 符號進行加粗。"
+    : "請針對以下嬰兒症狀提供詳細的用藥建議、可能的病因分析、居家護理指南以及何時必須就醫的警訊。使用繁體中文。如果使用者沒有提供嬰幼兒的年齡，請在建議中先提醒「不同年齡的處置方式不同，建議您提供孩子的年齡以獲取更準確的資訊」。注意：回答中絕對不要使用 ** 符號進行加粗。";
 
-  if (apiKey) {
-    const messages = [
-      ...history.map(h => ({ role: h.role === 'user' ? 'user' : 'assistant', content: h.content })),
-      { role: "user", content: `【系統強制提示：回覆必須完全使用繁體中文，且「必須」包含 --- 分隔符號】\n\n使用者症狀：${currentSymptom}` }
-    ];
-    return await callUnifiedAPI(messages, undefined, "meta/llama-3.1-70b-instruct", apiKey, 'symptoms');
-  }
-
-  // Fallback to Ollama
-  const prompt = history.map(h => `${h.role === 'user' ? 'User' : 'Assistant'}: ${h.content}`).join('\n') + `\nUser: ${currentSymptom}`;
-  const ollamaResponse = await callOllama(prompt, instruction);
+  // Try Ollama first
+  const ollamaResponse = await callOllama(`${instruction}\n症狀描述：${symptoms}`);
   if (ollamaResponse) return ollamaResponse;
 
-  throw new Error("無法連線至本地 Ollama，建議輸入 NVIDIA API 金鑰。");
+  const ai = getGeminiClient(apiKey);
+  const model = ai.models.generateContent({
+    model: "gemini-3.1-pro-preview",
+    contents: [{ parts: [{ text: `${instruction}\n症狀描述：${symptoms}` }] }]
+  });
+
+  const response = await model;
+  return response.text;
 };
 
 export const chatWithAI = async (history: { role: string, content: string }[], message: string, apiKey?: string) => {
-  const systemInstruction = "你是一位親切且專業的兒科醫療顧問集。請根據上下文回答問題。請善用表格與列表。注意：在回答中絕對不要使用 ** 符號。若要強調重點，請將其放在『 』括號內。絕對不要推銷任何 AI 產品。如果遇到緊急醫療情況，請務必提醒家長立即就醫。";
+  const systemInstruction = "你是一位親切且專業的兒科醫療顧問。請根據上下文回答問題。當使用者提出醫療或健康相關問題時，如果對話中尚未提及嬰幼兒的「年齡」（例如幾個月大、幾歲），請務必先主動且禮貌地詢問孩子的年齡，因為不同年齡層的醫療處置和用藥建議會有很大的差異。在得知年齡後，再給出適當的醫療答覆。請注意：在回答時絕對不要使用 Markdown 的加粗符號（例如 **文字**），請使用純文字或換行來區隔重點。絕對不要推銷任何 AI 產品。如果遇到緊急醫療情況，請務必提醒家長立即就醫。";
 
-  if (apiKey) {
-    const messages = [
-      ...history.map(h => ({ role: h.role === 'user' ? 'user' : 'assistant', content: h.content })),
-      { role: "user", content: message }
-    ];
-    return await callUnifiedAPI(messages, undefined, "meta/llama-3.1-70b-instruct", apiKey, 'chat');
-  }
-
-  // Fallback to Ollama
+  // Try Ollama first
   const prompt = history.map(h => `${h.role === 'user' ? 'User' : 'Assistant'}: ${h.content}`).join('\n') + `\nUser: ${message}`;
   const ollamaResponse = await callOllama(prompt, systemInstruction);
   if (ollamaResponse) return ollamaResponse;
 
-  throw new Error("無可用 AI 服務，請輸入 NVIDIA API 金鑰。");
+  // Collapse consecutive messages of the same role for Gemini
+  const collapsedHistory: { role: 'user' | 'model', parts: { text: string }[] }[] = [];
+  for (const h of history) {
+    const role = h.role === 'user' ? 'user' : 'model';
+    if (collapsedHistory.length > 0 && collapsedHistory[collapsedHistory.length - 1].role === role) {
+      collapsedHistory[collapsedHistory.length - 1].parts[0].text += `\n\n${h.content}`;
+    } else {
+      collapsedHistory.push({ role, parts: [{ text: h.content }] });
+    }
+  }
+
+  // Ensure the history starts with a user message
+  if (collapsedHistory.length > 0 && collapsedHistory[0].role === 'model') {
+    collapsedHistory.unshift({ role: 'user', parts: [{ text: '[系統提示：對話開始]' }] });
+  }
+
+  // If the last message in history was also from the user, combine the new message into it
+  if (collapsedHistory.length > 0 && collapsedHistory[collapsedHistory.length - 1].role === 'user') {
+    collapsedHistory[collapsedHistory.length - 1].parts[0].text += `\n\n${message}`;
+  } else {
+    collapsedHistory.push({ role: 'user', parts: [{ text: message }] });
+  }
+
+  const ai = getGeminiClient(apiKey);
+  const response = await ai.models.generateContent({
+    model: "gemini-3.1-pro-preview",
+    contents: collapsedHistory,
+    config: {
+      systemInstruction
+    }
+  });
+
+  return response.text;
+};
+
+export const testGeminiKey = async (apiKey: string): Promise<boolean> => {
+  try {
+    const ai = getGeminiClient(apiKey);
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: "hi",
+      config: { maxOutputTokens: 5 }
+    });
+    return !!response.text;
+  } catch (error) {
+    console.error("Gemini Key Test Failed:", error);
+    return false;
+  }
 };
 
 export const generateTitleSummary = async (userMessage: string, aiResponse: string, apiKey?: string) => {
@@ -135,22 +142,24 @@ export const generateTitleSummary = async (userMessage: string, aiResponse: stri
 使用者：${userMessage}
 AI：${aiResponse}
 
-只需回傳標題文字，不要有引號或額外說明。`;
+要求：
+1. 只需回傳標題文字，不要有引號或額外說明。
+2. 必須強制使用繁體中文，禁止出現簡體字。`;
 
-  if (apiKey) {
-    try {
-      const messages = [{ role: "user", content: prompt }];
-      const title = await callUnifiedAPI(messages, undefined, "meta/llama-3.1-8b-instruct", apiKey);
-      return title.trim();
-    } catch (e) {
-      console.error("API title error", e);
-      return "新對話";
-    }
-  }
-
-  // Fallback
   const ollamaResponse = await callOllama(prompt);
   if (ollamaResponse) return ollamaResponse.trim();
-  
-  return "新對話";
+
+  try {
+    const ai = getGeminiClient(apiKey);
+    const response = await ai.models.generateContent({
+      model: "gemini-3.1-pro-preview",
+      contents: [{
+        parts: [{ text: prompt }]
+      }]
+    });
+    return response.text?.trim() || "新對話";
+  } catch (error) {
+    console.error("Error generating title summary:", error);
+    return "新對話";
+  }
 };

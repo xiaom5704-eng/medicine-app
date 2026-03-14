@@ -33,49 +33,19 @@
 
 ---
 
-## 🌐 如何部署到雲端 (給別人用)
+## 🌐 如何部屬到雲端 (給別人用)
 
-如果您希望產生一個網址讓別人直接點開使用，我們已配置好支援 **Heroku** 的部署環境。
+如果您希望產生一個網址讓別人直接點開使用：
 
-### 部署至 Heroku 的步驟
+### 1. 部屬至 Google Cloud Run (推薦)
+本專案已內建 `Dockerfile`，您可以直接連接 GitHub 儲存庫至 Google Cloud Run 進行自動部屬。
 
-1. **註冊並安裝 Heroku CLI**：
-   請前往 [Heroku 官網](https://heroku.com/) 註冊帳號，並下載安裝 [Heroku CLI](https://devcenter.heroku.com/articles/heroku-cli)。
+### 2. 設定環境變數
+在雲端平台設定以下環境變數：
+- `GEMINI_API_KEY`: 您的 Google AI Studio 金鑰 (選填，若無 Ollama 時使用)。
 
-2. **登入 Heroku**：
-   打開終端機 (Terminal 或 PowerShell)，執行：
-   ```bash
-   heroku login
-   ```
-
-3. **建立 Heroku App**：
-   在專案資源夾底下執行：
-   ```bash
-   heroku create <您自訂的App名稱(可留空由系統隨機建立)>
-   ```
-
-4. **設定環境變數**：
-   請將您從 NVIDIA 取得的 API Key 設定到 Heroku 環境變數中：
-   ```bash
-   heroku config:set NVIDIA_API_KEY="您的_NVIDIA_API_KEY"
-   ```
-
-5. **推播程式碼至 Heroku**：
-   ```bash
-   git add .
-   git commit -m "Prepare for Heroku deployment"
-   git push heroku main
-   ```
-
-6. **開啟網頁**：
-   部署完成後，執行以下指令即可自動在瀏覽器開啟您的 App：
-   ```bash
-   heroku open
-   ```
-
-> ⚠️ **溫馨提示**：
-> 部署至 Heroku 的免費版本 (EcoDynos) 或是展示版，每天都有硬性重啟的機制，且不提供持久化的檔案系統。這代表每一次重啟，您的 SQLite (`medsafe.db`) 都會被清空，**對話紀錄將無法永久保留**。
-> 使用者端可以點擊瀏覽器網址列的「安裝」圖示，將其安裝至 Windows 或手機 (PWA支援)。
+### 3. 使用者端安裝
+使用者點開網址後，可以點擊瀏覽器網址列的「安裝」圖示，將其安裝至 Windows 或手機。
 
 ---
 
@@ -101,32 +71,11 @@
 
 ---
 
-## 🛠️ 開發者指南
-
-### 安裝與啟動
-1. 確保已安裝 Node.js (v20+)
-2. 安裝套件：`npm install`
-3. 啟動開發伺服器：`npm run dev` (包含 Vite 前端與 Express 後端)
-
-### 相關腳本
-- `npm run build`: 同時編譯前端與後端伺服器檔案。
-- `npm run electron:dev`: 啟動 Electron 開發環境。
-- `npm run electron:build`: 打包 Windows 安裝檔。
-
-## 🤖 CI/CD 與自動化
-本專案使用 GitHub Actions 定義了自動化工作流 (.github/workflows/main.yml)：
-- **自動化測試與編譯**：每當 `push` 或 `Pull Request` 到 `main` 分支時，會自動執行 `npm install` 與 `npm run build`。
-- **Docker 檢查**：自動檢查 Dockerfile 是否能正確編譯，確保部署穩定性。
-
----
-
-## 🏗️ 技術棧
-- **Frontend**: React 19 + Vite 6 + Tailwind CSS 4 + Framer Motion
+## 🛠️ 技術棧
+- **Frontend**: React + Vite + Tailwind CSS + Framer Motion
 - **Backend**: Express + SQLite (Better-SQLite3)
 - **AI**: Ollama (Llama 3.2:3b) & Google Gemini API
 - **Container**: Docker & Docker Compose
-- **CI/CD**: GitHub Actions
-- **Desktop**: Electron 41
 
 ---
 

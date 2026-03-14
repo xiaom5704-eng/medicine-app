@@ -1,39 +1,9 @@
-# Dependencies
 node_modules/
-.pnp
-.pnp.js
-
-# Testing
-coverage/
-
-# Production
+build/
 dist/
 dist-server/
-release/
-build/
-
-# SQLite
-*.db
-*.db-journal
-*.db-shm
-*.db-wal
-
-# Misc
+coverage/
 .DS_Store
 *.log
-v8.flags.json
-.electron-builder.env
-
-# Environment
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
+.env*
 !.env.example
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo

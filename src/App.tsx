@@ -16,25 +16,112 @@ import {
   Pin,
   MoreVertical,
   Edit2,
-  BookOpen,
   Mic,
-  MicOff,
   Volume2,
-  VolumeX
+  Square
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Session, Message, MedicationFile } from './types';
-import { analyzeMedications, getSymptomAdvice, chatWithAI, generateTitleSummary } from './services/gemini';
-import MarkdownRenderer from './components/MarkdownRenderer';
-import { ErrorBoundary } from './components/ErrorBoundary';
-import { useSpeechRecognition, useSpeechSynthesis } from './hooks/useSpeech';
+import { analyzeMedications, getSymptomAdvice, chatWithAI, generateTitleSummary, testGeminiKey } from './services/gemini';
 
 export default function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const currentSessionIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    currentSessionIdRef.current = currentSessionId;
+  }, [currentSessionId]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+
+  // Speech states
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [speakingText, setSpeakingText] = useState<string | null>(null);
+
+  // TTS
+  const speak = (text: string) => {
+    if (isSpeaking) {
+      window.speechSynthesis.cancel();
+      if (speakingText === text) {
+        setIsSpeaking(false);
+        setSpeakingText(null);
+        return;
+      }
+    }
+    
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'zh-TW';
+    
+    // Try to find a Taiwan female voice
+    const voices = window.speechSynthesis.getVoices();
+    const twVoice = voices.find(v => v.lang.includes('zh-TW') && (v.name.includes('Female') || v.name.includes('Google') || v.name.includes('Mei-Jia')));
+    if (twVoice) utterance.voice = twVoice;
+    
+    utterance.onstart = () => {
+      setIsSpeaking(true);
+      setSpeakingText(text);
+    };
+    utterance.onend = () => {
+      setIsSpeaking(false);
+      setSpeakingText(null);
+    };
+    utterance.onerror = () => {
+      setIsSpeaking(false);
+      setSpeakingText(null);
+    };
+    
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const stopSpeaking = () => {
+    window.speechSynthesis.cancel();
+    setIsSpeaking(false);
+    setSpeakingText(null);
+  };
+
+  // STT
+  const startListening = () => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert('您的瀏覽器不支援語音辨識功能。');
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'zh-TW';
+    recognition.continuous = false;
+    recognition.interimResults = false;
+
+    recognition.onstart = () => {
+      setIsListening(true);
+    };
+
+    recognition.onresult = (event: any) => {
+      const transcript = event.results[0][0].transcript;
+      setInputText(prev => prev + transcript);
+    };
+
+    recognition.onerror = (event: any) => {
+      console.error('Speech recognition error', event.error);
+      setIsListening(false);
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+    };
+
+    recognition.start();
+  };
+
+  // Cleanup speech on unmount
+  useEffect(() => {
+    return () => {
+      window.speechSynthesis.cancel();
+    };
+  }, []);
   const [medFiles, setMedFiles] = useState<MedicationFile[]>([]);
   const [activeTab, setActiveTab] = useState<'chat' | 'medication' | 'symptoms'>('chat');
   const [symptomMode, setSymptomMode] = useState<'concise' | 'detailed'>('concise');
@@ -43,55 +130,53 @@ export default function App() {
   const [renamingSession, setRenamingSession] = useState<Session | null>(null);
   const [newTitle, setNewTitle] = useState('');
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
-  const [userApiKey, setUserApiKey] = useState(() => {
-    return localStorage.getItem('nvidia_api_key') || (process.env.NVIDIA_API_KEY as string) || '';
-  });
+  const [userApiKey, setUserApiKey] = useState('');
   const [isOllamaOnline, setIsOllamaOnline] = useState<boolean | null>(null);
-  const [ollamaVersion, setOllamaVersion] = useState<string>('');
+  const [ollamaModel, setOllamaModel] = useState<string | null>(null);
+  const [isGeminiValid, setIsGeminiValid] = useState<boolean>(false);
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
-  const [showReadme, setShowReadme] = useState(false);
-  const [readmeContent, setReadmeContent] = useState('');
-  const [nvidiaStatus, setNvidiaStatus] = useState<'idle' | 'verifying' | 'valid' | 'invalid'>(
-    localStorage.getItem('nvidia_api_key') ? 'valid' : 'idle'
-  );
-  const [isFlashing, setIsFlashing] = useState(false);
-  const [activeSymptomTab, setActiveSymptomTab] = useState<'quick' | 'deep'>('quick');
-  const [isVerifyingKey, setIsVerifyingKey] = useState(false);
-  const [keyError, setKeyError] = useState('');
-  const [hasAcceptedDisclaimer, setHasAcceptedDisclaimer] = useState(() => {
-    return localStorage.getItem('has_accepted_disclaimer') === 'true';
-  });
-  // --- Voice features ---
-  const { isListening, isSupported: speechInputSupported, startListening, stopListening } = useSpeechRecognition({
-    onResult: (transcript) => setInputText(prev => prev + transcript)
-  });
-  const { speakingId, speak: speakText, stop: stopSpeech } = useSpeechSynthesis();
-
-  const [apiMetrics, setApiMetrics] = useState<{ latency: number; successRate: number; totalRequests: number; successes: number }>({
-    latency: 0,
-    successRate: 100,
-    totalRequests: 0,
-    successes: 0
-  });
-
-  const updateMetrics = (latency: number, success: boolean) => {
-    setApiMetrics(prev => {
-      const newTotal = prev.totalRequests + 1;
-      const newSuccesses = success ? prev.successes + 1 : prev.successes;
-      return {
-        latency: latency,
-        totalRequests: newTotal,
-        successes: newSuccesses,
-        successRate: Math.round((newSuccesses / newTotal) * 100)
-      };
-    });
-  };
-
-  useEffect(() => {
-    if (hasAcceptedDisclaimer) {
-      localStorage.setItem('has_accepted_disclaimer', 'true');
+  const [isTestingKey, setIsTestingKey] = useState(false);
+  const [keyTestResult, setKeyTestResult] = useState<'success' | 'error' | null>(null);
+  const [showGuideModal, setShowGuideModal] = useState(false);
+  const [showDisclaimerModal, setShowDisclaimerModal] = useState(() => {
+    const lastAccepted = localStorage.getItem('disclaimerAcceptedAt');
+    if (lastAccepted) {
+      const lastAcceptedTime = parseInt(lastAccepted, 10);
+      const now = Date.now();
+      const twentyFourHours = 24 * 60 * 60 * 1000;
+      if (now - lastAcceptedTime < twentyFourHours) {
+        return false;
+      }
     }
-  }, [hasAcceptedDisclaimer]);
+    return true;
+  });
+  const [apiMetrics, setApiMetrics] = useState({
+    totalRequests: 0,
+    successfulRequests: 0,
+    totalLatencyMs: 0
+  });
+
+  const trackApiCall = async <T,>(apiCall: () => Promise<T>): Promise<T> => {
+    const startTime = Date.now();
+    setApiMetrics(prev => ({ ...prev, totalRequests: prev.totalRequests + 1 }));
+    try {
+      const result = await apiCall();
+      const latency = Date.now() - startTime;
+      setApiMetrics(prev => ({
+        ...prev,
+        successfulRequests: prev.successfulRequests + 1,
+        totalLatencyMs: prev.totalLatencyMs + latency
+      }));
+      return result;
+    } catch (error) {
+      const latency = Date.now() - startTime;
+      setApiMetrics(prev => ({
+        ...prev,
+        totalLatencyMs: prev.totalLatencyMs + latency
+      }));
+      throw error;
+    }
+  };
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -99,64 +184,34 @@ export default function App() {
   useEffect(() => {
     fetchSessions();
     checkOllamaStatus();
-    if (userApiKey) verifyNvidiaKey(userApiKey);
-    const interval = setInterval(() => {
-      checkOllamaStatus();
-      fetchSessions();
-    }, 10000); 
+    const interval = setInterval(checkOllamaStatus, 30000); // Check every 30s
     return () => clearInterval(interval);
   }, []);
-
-  const verifyNvidiaKey = async (key: string) => {
-    if (!key) {
-      setNvidiaStatus('idle');
-      return;
-    }
-    setIsVerifyingKey(true);
-    setNvidiaStatus('verifying');
-    setKeyError('');
-    try {
-      const res = await fetch('/api/ai/nvidia/verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: key }),
-      });
-      const data = await res.json();
-      if (data.valid) {
-        setNvidiaStatus('valid');
-        localStorage.setItem('nvidia_api_key', key);
-      } else {
-        setNvidiaStatus('invalid');
-        setKeyError(data.error || '金鑰無效');
-      }
-    } catch (e) {
-      setNvidiaStatus('invalid');
-      setKeyError('連線失敗');
-    } finally {
-      setIsVerifyingKey(false);
-    }
-  };
 
   const checkOllamaStatus = async () => {
     try {
       const res = await fetch('/api/ai/ollama/status');
       const data = await res.json();
       setIsOllamaOnline(data.status === 'online');
-      if (data.version) setOllamaVersion(data.version);
+      if (data.status === 'online' && data.model) {
+        setOllamaModel(data.model);
+      } else {
+        setOllamaModel(null);
+      }
     } catch (e) {
       setIsOllamaOnline(false);
+      setOllamaModel(null);
     }
   };
 
-  const fetchReadme = async () => {
-    try {
-      const res = await fetch('/api/readme');
-      const data = await res.json();
-      setReadmeContent(data.content);
-      setShowReadme(true);
-    } catch (e) {
-      console.error("Failed to fetch README", e);
-    }
+  const handleTestKey = async () => {
+    if (!userApiKey.trim()) return;
+    setIsTestingKey(true);
+    setKeyTestResult(null);
+    const isValid = await trackApiCall(() => testGeminiKey(userApiKey));
+    setIsGeminiValid(isValid);
+    setKeyTestResult(isValid ? 'success' : 'error');
+    setIsTestingKey(false);
   };
 
   useEffect(() => {
@@ -165,7 +220,15 @@ export default function App() {
     } else {
       setMessages([]);
     }
+    setSymptomResult(null);
+    setMedFiles([]);
+    setInputText('');
+    stopSpeaking();
   }, [currentSessionId]);
+
+  useEffect(() => {
+    stopSpeaking();
+  }, [activeTab]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -180,24 +243,20 @@ export default function App() {
   const fetchSessions = async () => {
     try {
       const res = await fetch('/api/sessions');
-      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
       const data = await res.json();
-      setSessions(Array.isArray(data) ? data : []);
+      setSessions(data);
     } catch (e) {
-      console.error("Failed to fetch sessions:", e);
-      // Keep existing sessions or set empty if critical
+      console.error("Failed to fetch sessions", e);
     }
   };
 
   const fetchMessages = async (id: string) => {
     try {
       const res = await fetch(`/api/messages/${id}`);
-      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
       const data = await res.json();
-      setMessages(Array.isArray(data) ? data : []);
+      setMessages(data);
     } catch (e) {
-      console.error("Failed to fetch messages:", e);
-      setMessages([]); // Clear messages on failure to prevent stale data
+      console.error("Failed to fetch messages", e);
     }
   };
 
@@ -205,19 +264,16 @@ export default function App() {
     const id = Date.now().toString();
     const title = `新對話 ${new Date().toLocaleString('zh-TW', { hour: '2-digit', minute: '2-digit' })}`;
     try {
-      const res = await fetch('/api/sessions', {
+      await fetch('/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id, title }),
       });
-      if (!res.ok) throw new Error('Failed to create session');
-      
-      await fetchSessions();
+      fetchSessions();
       setCurrentSessionId(id);
       setActiveTab('chat');
     } catch (e) {
-      console.error("Failed to create session:", e);
-      alert("無法建立新對話，請檢查網路連線。");
+      console.error("Failed to create session", e);
     }
   };
 
@@ -250,7 +306,7 @@ export default function App() {
   const openRenameDialog = (session: Session, e: React.MouseEvent) => {
     e.stopPropagation();
     setRenamingSession(session);
-    setNewTitle(session.title || '');
+    setNewTitle(session.title);
     setIsRenameDialogOpen(true);
     setActiveMenuId(null);
   };
@@ -272,15 +328,31 @@ export default function App() {
   };
 
   const handleSendMessage = async () => {
-    if (!inputText.trim() || !currentSessionId) return;
+    if (!inputText.trim()) return;
 
-    const userMsg: Message = { session_id: currentSessionId, role: 'user', content: inputText };
-    setMessages(prev => [...prev, userMsg]);
-    setInputText('');
+    const startingSessionId = currentSessionId;
+    let sessionId = startingSessionId;
+    if (!sessionId) {
+      sessionId = Date.now().toString();
+      const title = `新對話 ${new Date().toLocaleString('zh-TW', { hour: '2-digit', minute: '2-digit' })}`;
+      await fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: sessionId, title }),
+      });
+      fetchSessions();
+      if (currentSessionIdRef.current === startingSessionId) {
+        setCurrentSessionId(sessionId);
+      }
+    }
+
+    const userMsg: Message = { session_id: sessionId, role: 'user', content: inputText };
+    
+    if (currentSessionIdRef.current === startingSessionId || currentSessionIdRef.current === sessionId) {
+      setMessages(prev => [...prev, userMsg]);
+      setInputText('');
+    }
     setIsLoading(true);
-
-    // If in symptom tab, use handleSymptomSubmit logic but integrated here
-    // or just let it flow with the chatWithAI which now handles modes.
 
     try {
       await fetch('/api/messages', {
@@ -289,22 +361,12 @@ export default function App() {
         body: JSON.stringify(userMsg),
       });
 
-      const startTime = Date.now();
-      const aiResponse = activeTab === 'symptoms'
-        ? await getSymptomAdvice(
-            messages.map(m => ({ role: m.role, content: m.content })),
-            inputText,
-            userApiKey
-          )
-        : await chatWithAI(
-            messages.map(m => ({ role: m.role, content: m.content })), 
-            inputText,
-            userApiKey
-          );
-      const latency = Date.now() - startTime;
-      updateMetrics(latency, !!aiResponse);
-
-      const aiMsg: Message = { session_id: currentSessionId, role: 'assistant', content: aiResponse || '抱歉，我現在無法回答。' };
+      const aiResponse = await trackApiCall(() => chatWithAI(
+        messages.map(m => ({ role: m.role, content: m.content })), 
+        inputText,
+        userApiKey
+      ));
+      const aiMsg: Message = { session_id: sessionId, role: 'assistant', content: aiResponse || '抱歉，我現在無法回答。' };
       
       await fetch('/api/messages', {
         method: 'POST',
@@ -312,16 +374,20 @@ export default function App() {
         body: JSON.stringify(aiMsg),
       });
 
-      // No need to setMessages(prev => [...prev, aiMsg]) here if polling is active, 
-      // or we can just fetch the latest from server to be sure.
-      await fetchMessages(currentSessionId);
+      if (currentSessionIdRef.current === startingSessionId || currentSessionIdRef.current === sessionId) {
+        setMessages(prev => [...prev, aiMsg]);
+      }
 
       // Auto-titling logic
-      const currentSession = sessions.find(s => s.id === currentSessionId);
-      if (currentSession && !currentSession.is_manual_title && messages.length === 0) {
-        const generatedTitle = await generateTitleSummary(inputText, aiResponse || '', userApiKey);
+      const currentSession = sessions.find(s => s.id === sessionId);
+      const isNewSession = !startingSessionId;
+      const isDefaultTitle = currentSession ? (currentSession.title.startsWith('新對話') || currentSession.title.startsWith('藥物分析') || currentSession.title.startsWith('症狀諮詢')) : true;
+      const isManualTitle = currentSession ? currentSession.is_manual_title : false;
+
+      if (isNewSession || (currentSession && !isManualTitle && isDefaultTitle)) {
+        const generatedTitle = await trackApiCall(() => generateTitleSummary(inputText, aiResponse || '', userApiKey));
         if (generatedTitle) {
-          await fetch(`/api/sessions/${currentSessionId}`, {
+          await fetch(`/api/sessions/${sessionId}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ title: generatedTitle, is_manual_title: 0 }),
@@ -329,10 +395,13 @@ export default function App() {
           fetchSessions();
         }
       }
+
     } catch (error) {
       console.error(error);
     } finally {
-      setIsLoading(false);
+      if (currentSessionIdRef.current === startingSessionId || currentSessionIdRef.current === sessionId) {
+        setIsLoading(false);
+      }
     }
   };
 
@@ -340,17 +409,30 @@ export default function App() {
     const files = e.target.files;
     if (!files) return;
 
-    Array.from(files).forEach((file: File) => {
-      if (medFiles.length >= 4) return;
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setMedFiles(prev => [...prev, {
-          id: Math.random().toString(36).substr(2, 9),
-          preview: reader.result as string,
-          name: file.name
-        }]);
-      };
-      reader.readAsDataURL(file);
+    const newFiles = Array.from(files);
+    
+    setMedFiles(prev => {
+      const availableSlots = 4 - prev.length;
+      if (availableSlots <= 0) return prev;
+      
+      const filesToAdd = newFiles.slice(0, availableSlots);
+      
+      filesToAdd.forEach((file: File) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          setMedFiles(current => {
+            if (current.length >= 4) return current;
+            return [...current, {
+              id: Math.random().toString(36).substr(2, 9),
+              preview: reader.result as string,
+              name: file.name
+            }];
+          });
+        };
+        reader.readAsDataURL(file);
+      });
+      
+      return prev;
     });
   };
 
@@ -375,7 +457,7 @@ export default function App() {
       }
     } catch (err) {
       console.error("Error accessing camera:", err);
-      alert("無法啟動相機，請檢查權限設定或裝置連線。");
+      alert("無法啟動相機，請檢查權限設定。");
       setShowCamera(false);
     }
   };
@@ -390,8 +472,7 @@ export default function App() {
 
   const takePhoto = () => {
     if (medFiles.length >= 4) {
-      alert("已達到圖片數量上限（最多 4 張），請先移除部分圖片再拍照。");
-      stopCamera();
+      alert("最多只能上傳 4 張照片");
       return;
     }
     if (videoRef.current && canvasRef.current) {
@@ -402,34 +483,17 @@ export default function App() {
       const ctx = canvas.getContext('2d');
       if (ctx) {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
-        
-        // Visual feedback
-        setIsFlashing(true);
-        setTimeout(() => setIsFlashing(false), 150);
-
+        const dataUrl = canvas.toDataURL('image/jpeg');
         setMedFiles(prev => {
-          const newFiles = [...prev, {
+          if (prev.length >= 4) return prev;
+          return [...prev, {
             id: Math.random().toString(36).substr(2, 9),
             preview: dataUrl,
-            name: `現場拍攝_${new Date().getTime()}.jpg`
+            name: `相機拍攝_${new Date().getTime()}.jpg`
           }];
-          return newFiles;
         });
-
-        // Small delay before closing and analysis to show feedback
-        setTimeout(() => {
-          stopCamera();
-          setActiveTab('medication');
-          // Start analysis automatically if it's the first photo
-          if (medFiles.length === 0) {
-            handleAnalyzeMedications();
-          }
-        }, 300);
+        stopCamera();
       }
-    } else {
-      console.error("Capture failed: ref missing", { video: !!videoRef.current, canvas: !!canvasRef.current });
-      alert("拍照失敗，請重啟功能。");
     }
   };
 
@@ -437,7 +501,8 @@ export default function App() {
     if (medFiles.length === 0) return;
     setIsLoading(true);
     
-    let sessionId = currentSessionId;
+    const startingSessionId = currentSessionId;
+    let sessionId = startingSessionId;
     if (!sessionId) {
       sessionId = Date.now().toString();
       const title = `藥物分析 ${new Date().toLocaleString('zh-TW', { hour: '2-digit', minute: '2-digit' })}`;
@@ -447,11 +512,19 @@ export default function App() {
         body: JSON.stringify({ id: sessionId, title }),
       });
       fetchSessions();
-      setCurrentSessionId(sessionId);
+      if (currentSessionIdRef.current === startingSessionId) {
+        setCurrentSessionId(sessionId);
+      }
     }
 
     try {
-      const result = await analyzeMedications(medFiles.map(f => f.preview), targetLanguage, userApiKey);
+      const result = await trackApiCall(() => analyzeMedications(medFiles.map(f => f.preview), targetLanguage, userApiKey));
+      
+      const userMsg: Message = {
+        session_id: sessionId,
+        role: 'user',
+        content: `[上傳了 ${medFiles.length} 張藥物照片進行分析]`
+      };
       const aiMsg: Message = { 
         session_id: sessionId, 
         role: 'assistant', 
@@ -461,84 +534,136 @@ export default function App() {
       await fetch('/api/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(userMsg),
+      });
+
+      await fetch('/api/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(aiMsg),
       });
 
-      setMessages(prev => [...prev, aiMsg]);
-      setActiveTab('chat');
-      setMedFiles([]);
-      // Force fetch to ensure state sync
-      fetchMessages(sessionId);
+      if (currentSessionIdRef.current === startingSessionId || currentSessionIdRef.current === sessionId) {
+        setMessages(prev => [...prev, userMsg, aiMsg]);
+        setActiveTab('chat');
+        setMedFiles([]);
+      }
+
+      // Auto-titling logic
+      const currentSession = sessions.find(s => s.id === sessionId);
+      const isNewSession = !startingSessionId;
+      const isDefaultTitle = currentSession ? (currentSession.title.startsWith('新對話') || currentSession.title.startsWith('藥物分析') || currentSession.title.startsWith('症狀諮詢')) : true;
+      const isManualTitle = currentSession ? currentSession.is_manual_title : false;
+
+      if (isNewSession || (currentSession && !isManualTitle && isDefaultTitle)) {
+        const generatedTitle = await trackApiCall(() => generateTitleSummary('請幫我分析這些藥物', result, userApiKey));
+        if (generatedTitle) {
+          await fetch(`/api/sessions/${sessionId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title: generatedTitle, is_manual_title: 0 }),
+          });
+          fetchSessions();
+        }
+      }
     } catch (error) {
       console.error(error);
     } finally {
-      setIsLoading(false);
+      if (currentSessionIdRef.current === startingSessionId || currentSessionIdRef.current === sessionId) {
+        setIsLoading(false);
+      }
     }
   };
 
-  const [symptomInput, setSymptomInput] = useState('');
   const handleSymptomSubmit = async (symptoms: string) => {
     if (!symptoms.trim()) return;
     setIsLoading(true);
-    
-    // Use currentSessionId if available, or create a new one for symptoms
-    let sessionId = currentSessionId;
-    if (!sessionId) {
-      sessionId = Date.now().toString();
-      const title = `症狀諮詢 ${new Date().toLocaleString('zh-TW', { hour: '2-digit', minute: '2-digit' })}`;
-      await fetch('/api/sessions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: sessionId, title }),
-      });
-      fetchSessions();
-      setCurrentSessionId(sessionId);
-    }
+    setSymptomResult(null);
 
-    const userMsg: Message = { session_id: sessionId, role: 'user', content: symptoms };
-    setMessages(prev => [...prev, userMsg]);
-    setSymptomInput('');
+    const startingSessionId = currentSessionId;
+    let sessionId = startingSessionId;
 
     try {
-      // Save user message
+      const result = await trackApiCall(() => getSymptomAdvice(symptoms, symptomMode, userApiKey));
+      
+      // Only show result if we haven't switched sessions
+      if (currentSessionIdRef.current === startingSessionId) {
+        setSymptomResult(result);
+      }
+      
+      // Still save to history for record keeping
+      if (!sessionId) {
+        sessionId = Date.now().toString();
+        const title = `症狀諮詢 ${new Date().toLocaleString('zh-TW', { hour: '2-digit', minute: '2-digit' })}`;
+        await fetch('/api/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: sessionId, title }),
+        });
+        fetchSessions();
+        // Only switch to the new session if the user hasn't manually switched to another one
+        if (currentSessionIdRef.current === startingSessionId) {
+          setCurrentSessionId(sessionId);
+        }
+      }
+
+      const userMsg: Message = {
+        session_id: sessionId,
+        role: 'user',
+        content: `[症狀諮詢 - ${symptomMode === 'concise' ? '簡潔' : '詳細'}]\n${symptoms}`
+      };
+      const aiMsg: Message = { 
+        session_id: sessionId, 
+        role: 'assistant', 
+        content: `### 症狀建議 (${symptomMode === 'concise' ? '簡潔' : '詳細'})\n\n${result}` 
+      };
+      
       await fetch('/api/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(userMsg),
       });
 
-      const result = await getSymptomAdvice(
-        messages.map(m => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.content })), 
-        symptoms, 
-        userApiKey
-      );
-      setSymptomResult(result);
-
-      const aiMsg: Message = { 
-        session_id: sessionId, 
-        role: 'assistant', 
-        content: result 
-      };
-      
       await fetch('/api/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(aiMsg),
       });
-      
-      await fetchMessages(sessionId);
-    } catch (error: any) {
-      console.error(`[症狀諮詢錯誤] 檔案: App.tsx, 訊息: ${error.message}`);
-      console.error('Stack trace:', error.stack);
-      alert("諮詢過程發生錯誤，請稍後再試。");
+
+      // Only update messages state if we are currently viewing this session
+      if (currentSessionIdRef.current === startingSessionId || currentSessionIdRef.current === sessionId) {
+        setMessages(prev => [...prev, userMsg, aiMsg]);
+      }
+
+      // Auto-titling logic
+      const currentSession = sessions.find(s => s.id === sessionId);
+      const isNewSession = !startingSessionId;
+      const isDefaultTitle = currentSession ? (currentSession.title.startsWith('新對話') || currentSession.title.startsWith('藥物分析') || currentSession.title.startsWith('症狀諮詢')) : true;
+      const isManualTitle = currentSession ? currentSession.is_manual_title : false;
+
+      if (isNewSession || (currentSession && !isManualTitle && isDefaultTitle)) {
+        const generatedTitle = await trackApiCall(() => generateTitleSummary(symptoms, result, userApiKey));
+        if (generatedTitle) {
+          await fetch(`/api/sessions/${sessionId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title: generatedTitle, is_manual_title: 0 }),
+          });
+          fetchSessions();
+        }
+      }
+
+    } catch (error) {
+      console.error(error);
     } finally {
-      setIsLoading(false);
+      if (currentSessionIdRef.current === startingSessionId || currentSessionIdRef.current === sessionId) {
+        setIsLoading(false);
+      }
     }
   };
 
   return (
-    <ErrorBoundary>
-      <div className="flex h-screen bg-[#F8FAFC] text-slate-800 font-sans">
+    <div className="flex h-screen bg-[#F8FAFC] text-slate-800 font-sans">
       {/* Sidebar */}
       <motion.aside 
         initial={false}
@@ -562,13 +687,11 @@ export default function App() {
               onClick={() => setCurrentSessionId(session.id)}
               className={`group relative flex items-center justify-between p-3 rounded-xl cursor-pointer transition-colors ${currentSessionId === session.id ? 'bg-emerald-50 text-emerald-700' : 'hover:bg-slate-50'}`}
             >
-              <div className="flex items-center gap-2 overflow-hidden flex-1">
+              <div className="flex items-center gap-3 overflow-hidden flex-1">
                 {!!session.is_pinned && (
                   <Pin size={14} className="text-emerald-600 fill-emerald-600 shrink-0" />
                 )}
-                <span className="truncate text-sm font-medium">
-                  {session.title || '未命名對話'}
-                </span>
+                <span className="truncate text-sm font-medium">{session.title}</span>
               </div>
               
               <div className="flex items-center gap-1">
@@ -585,131 +708,424 @@ export default function App() {
 
               {activeMenuId === session.id && (
                 <div className="absolute right-2 top-10 w-32 bg-white border border-slate-200 rounded-lg shadow-xl z-50 py-1">
-                  <button onClick={(e) => togglePin(session, e)} className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-slate-50 text-slate-600"><Pin size={12} />{!!session.is_pinned ? '取消釘選' : '釘選至頂部'}</button>
-                  <button onClick={(e) => openRenameDialog(session, e)} className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-slate-50 text-slate-600"><Edit2 size={12} />重新命名</button>
-                  <button onClick={(e) => deleteSession(session.id, e)} className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-red-50 text-red-600"><Trash2 size={12} />刪除對話</button>
+                  <button 
+                    onClick={(e) => togglePin(session, e)}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-slate-50 text-slate-600"
+                  >
+                    <Pin size={12} />
+                    {session.is_pinned ? '取消釘選' : '釘選至頂部'}
+                  </button>
+                  <button 
+                    onClick={(e) => openRenameDialog(session, e)}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-slate-50 text-slate-600"
+                  >
+                    <Edit2 size={12} />
+                    重新命名
+                  </button>
+                  <button 
+                    onClick={(e) => deleteSession(session.id, e)}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-xs hover:bg-red-50 text-red-600"
+                  >
+                    <Trash2 size={12} />
+                    刪除對話
+                  </button>
                 </div>
               )}
             </div>
           ))}
         </div>
 
-        <div className="p-4 border-t border-slate-100 text-xs text-slate-400 text-center">智慧醫療助理 v1.0</div>
-
-        <div className="p-4 border-t border-slate-100">
-          <button onClick={fetchReadme} className="w-full flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-emerald-50 text-slate-600 hover:text-emerald-700 transition-all font-medium group">
-            <BookOpen size={20} className="group-hover:scale-110 transition-transform" />
-            <span>使用指南</span>
+        <div className="p-4 border-t border-slate-100 flex flex-col gap-2">
+          <button 
+            onClick={() => setShowGuideModal(true)}
+            className="flex items-center gap-2 text-sm text-slate-600 hover:text-emerald-600 transition-colors p-2 rounded-lg hover:bg-slate-50"
+          >
+            <AlertCircle size={16} />
+            使用指南
           </button>
+          <div className="text-xs text-slate-400 text-center">
+            智慧醫療助理 v1.0
+          </div>
         </div>
       </motion.aside>
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col relative overflow-hidden">
         {/* Header */}
-        <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-6 z-30 shadow-sm relative">
+        <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-6 z-10">
           <div className="flex items-center gap-4">
-            <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2 hover:bg-slate-100 rounded-lg transition-colors text-slate-500"><History size={20} /></button>
-            <h1 className="text-lg font-semibold text-slate-900 flex items-center gap-2"><Stethoscope className="text-emerald-600" size={22} />智慧醫療助理</h1>
-            
-            <div className="flex items-center gap-3 ml-4">
-              <div className="hidden md:flex items-center px-3 py-1 bg-emerald-50 text-emerald-700 rounded-lg border border-emerald-100 text-[11px] font-bold">
-                當前狀態：{
-                  activeTab === 'chat' ? '一般生活助手' : 
-                  activeTab === 'symptoms' ? '專業醫療顧問' : 
-                  '藥物辨識分析'
-                } ({
-                  (userApiKey && nvidiaStatus === 'valid') ? 'NVIDIA API' : 
-                  isOllamaOnline ? 'Ollama 本地端' : 
-                  '無可用服務'
-                })
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="flex items-center gap-2 px-2 py-1 bg-slate-50 rounded-full border border-slate-200 cursor-help group/status relative">
-                  <div className={`w-2 h-2 rounded-full ${isOllamaOnline ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]' : 'bg-slate-300'}`} />
-                  <span className="text-[10px] font-medium text-slate-500 whitespace-nowrap">Ollama</span>
-                  {isOllamaOnline && ollamaVersion && (
-                    <div className="absolute top-[calc(100%+8px)] left-1/2 -translate-x-1/2 px-3 py-1.5 bg-slate-900 text-white text-[11px] rounded-lg opacity-0 group-hover/status:opacity-100 pointer-events-none transition-all duration-200 scale-95 group-hover/status:scale-100 whitespace-nowrap z-[100] shadow-2xl">版本: {ollamaVersion}</div>
-                  )}
-                </div>
-                <div className="flex items-center gap-2 px-2 py-1 bg-slate-50 rounded-full border border-slate-200 relative group/nvidia">
-                  <div className={`w-2 h-2 rounded-full ${nvidiaStatus === 'valid' ? 'bg-emerald-400 animate-breathe shadow-[0_0_8px_rgba(52,211,153,0.8)]' : nvidiaStatus === 'verifying' ? 'bg-amber-400 animate-pulse' : nvidiaStatus === 'invalid' ? 'bg-red-400' : 'bg-slate-300'}`} />
-                  <span className="text-[10px] font-medium text-slate-500 whitespace-nowrap">NVIDIA</span>
-                </div>
-              </div>
-              <button onClick={() => setShowApiKeyInput(!showApiKeyInput)} className="text-[10px] px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-600 transition-colors border border-slate-200">配置金鑰</button>
-            </div>
+            <button 
+              onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+              className="p-2 hover:bg-slate-100 rounded-lg transition-colors text-slate-500"
+            >
+              <History size={20} />
+            </button>
+            <h1 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
+              <Stethoscope className="text-emerald-600" size={22} />
+              智慧醫療助理
+            </h1>
           </div>
-          <nav className="flex bg-slate-100 p-1 rounded-xl">
-            <button onClick={() => setActiveTab('chat')} className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'chat' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>對話模式</button>
-            <button onClick={() => setActiveTab('medication')} className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'medication' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>藥物辨識</button>
-            <button onClick={() => setActiveTab('symptoms')} className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'symptoms' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>症狀諮詢</button>
-          </nav>
+
+          <div className="flex items-center gap-4">
+            {/* AI Status Box */}
+            <div className="hidden md:flex items-center bg-emerald-50 text-emerald-700 px-4 py-1.5 rounded-lg text-sm font-medium border border-emerald-100">
+              當前狀態：{isOllamaOnline ? '一般生活助手 (Ollama 本地端)' : (isGeminiValid ? '一般生活助手 (Gemini 雲端)' : '未連線 AI')}
+            </div>
+
+            {/* Indicators */}
+            <div className="hidden sm:flex items-center gap-2">
+              <div className="relative group flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-medium text-slate-600 cursor-help">
+                <div className={`w-2 h-2 rounded-full ${isOllamaOnline ? 'bg-emerald-500' : 'bg-slate-300'}`} />
+                Ollama
+                {isOllamaOnline && ollamaModel && (
+                  <div className="absolute top-full mt-2 left-1/2 -translate-x-1/2 px-2 py-1 bg-black text-white text-xs rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none z-50">
+                    目前模型：{ollamaModel}
+                  </div>
+                )}
+              </div>
+              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-medium text-slate-600">
+                <div className={`w-2 h-2 rounded-full ${isGeminiValid ? 'bg-blue-500' : 'bg-slate-300'}`} />
+                Gemini
+              </div>
+            </div>
+
+            {/* Config Button */}
+            <button 
+              onClick={() => setShowApiKeyInput(!showApiKeyInput)}
+              className="px-4 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-sm font-medium transition-colors border border-slate-200"
+            >
+              配置金鑰
+            </button>
+
+            {/* Tabs */}
+            <nav className="hidden lg:flex bg-slate-100 p-1 rounded-xl ml-2">
+              <button 
+                onClick={() => setActiveTab('chat')}
+                className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'chat' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                對話模式
+              </button>
+              <button 
+                onClick={() => setActiveTab('medication')}
+                className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'medication' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                藥物辨識
+              </button>
+              <button 
+                onClick={() => setActiveTab('symptoms')}
+                className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${activeTab === 'symptoms' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+              >
+                症狀諮詢
+              </button>
+            </nav>
+          </div>
         </header>
 
-        <div className="bg-amber-50 border-b border-amber-200 px-6 py-2 flex items-center justify-center text-amber-700 text-xs font-medium z-10 shrink-0">
-          <AlertCircle size={14} className="mr-2" />提示：本站為展示版本，對話紀錄將於伺服器重啟或閒置一段時間後自動清空。
-        </div>
-
+        {/* API Key Input Overlay */}
         <AnimatePresence>
           {showApiKeyInput && (
-            <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="absolute top-16 left-0 right-0 bg-white border-b border-slate-200 p-4 z-20 shadow-lg">
-              <div className="max-w-xl mx-auto flex flex-col gap-3">
+            <motion.div 
+              initial={{ opacity: 0, y: -20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="absolute top-16 left-0 right-0 bg-white border-b border-slate-200 p-6 z-20 shadow-lg"
+            >
+              <div className="max-w-3xl mx-auto flex flex-col gap-6">
                 <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-bold text-slate-800">NVIDIA API 設定</h3>
-                  <button onClick={() => setShowApiKeyInput(false)} className="text-slate-400 hover:text-slate-600"><X size={16} /></button>
+                  <h3 className="text-base font-bold text-slate-800">Gemini API 設定與測試</h3>
+                  <button onClick={() => setShowApiKeyInput(false)} className="text-slate-400 hover:text-slate-600">
+                    <X size={20} />
+                  </button>
                 </div>
-                <div className="flex flex-col gap-2">
-                  <div className="flex gap-2">
-                    <input type="password" value={userApiKey} onChange={(e) => setUserApiKey(e.target.value)} placeholder="在此輸入 NVIDIA API Key..." className="flex-1 p-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500" />
-                    <button onClick={() => { verifyNvidiaKey(userApiKey); setShowApiKeyInput(false); }} className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-bold">儲存並關閉</button>
+                
+                <p className="text-sm text-slate-500">
+                  如果您無法使用本地 Ollama，請輸入您的「Gemini API 金鑰」以啟用雲端 AI 功能。
+                  您可以從 <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-emerald-600 underline">Google AI Studio</a> 獲取金鑰。
+                </p>
+
+                <div className="flex gap-4">
+                  <input 
+                    type="password" 
+                    value={userApiKey}
+                    onChange={(e) => {
+                      setUserApiKey(e.target.value);
+                      setKeyTestResult(null);
+                    }}
+                    placeholder="在此輸入 Gemini API Key..."
+                    className="flex-1 p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+                  <button 
+                    onClick={handleTestKey}
+                    disabled={isTestingKey || !userApiKey}
+                    className="px-6 py-3 bg-emerald-600 text-white rounded-xl text-sm font-bold hover:bg-emerald-700 transition-colors disabled:opacity-50 flex items-center gap-2"
+                  >
+                    {isTestingKey && <Loader2 size={16} className="animate-spin" />}
+                    儲存並關閉
+                  </button>
+                </div>
+
+                {keyTestResult === 'success' && (
+                  <div className="text-sm text-emerald-600 font-medium flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-emerald-500" />
+                    金鑰測試成功！Gemini 雲端 AI 已啟用。
                   </div>
-                </div>
-                <div className="mt-4 grid grid-cols-3 gap-4 border-t border-slate-100 pt-4">
-                  <div className="bg-slate-50 p-3 rounded-xl border border-slate-100"><div className="text-[10px] text-slate-400 uppercase font-bold mb-1">平均延遲</div><div className="text-lg font-mono font-bold text-emerald-600">{apiMetrics.latency} ms</div></div>
-                  <div className="bg-slate-50 p-3 rounded-xl border border-slate-100"><div className="text-[10px] text-slate-400 uppercase font-bold mb-1">成功率</div><div className="text-lg font-mono font-bold text-blue-600">{apiMetrics.successRate}%</div></div>
-                  <div className="bg-slate-50 p-3 rounded-xl border border-slate-100"><div className="text-[10px] text-slate-400 uppercase font-bold mb-1">總請求</div><div className="text-lg font-mono font-bold text-slate-600">{apiMetrics.totalRequests}</div></div>
+                )}
+                {keyTestResult === 'error' && (
+                  <div className="text-sm text-red-500 font-medium flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-red-500" />
+                    金鑰無效或連線失敗，請檢查您的金鑰。
+                  </div>
+                )}
+
+                <div className="grid grid-cols-3 gap-4 mt-2">
+                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-100">
+                    <div className="text-xs text-slate-500 mb-1">平均延遲</div>
+                    <div className="text-xl font-bold text-emerald-600">
+                      {apiMetrics.totalRequests > 0 ? Math.round(apiMetrics.totalLatencyMs / apiMetrics.totalRequests) : 0} ms
+                    </div>
+                  </div>
+                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-100">
+                    <div className="text-xs text-slate-500 mb-1">成功率</div>
+                    <div className="text-xl font-bold text-blue-600">
+                      {apiMetrics.totalRequests > 0 ? Math.round((apiMetrics.successfulRequests / apiMetrics.totalRequests) * 100) : 100}%
+                    </div>
+                  </div>
+                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-100">
+                    <div className="text-xs text-slate-500 mb-1">總請求</div>
+                    <div className="text-xl font-bold text-slate-700">{apiMetrics.totalRequests}</div>
+                  </div>
                 </div>
               </div>
             </motion.div>
           )}
         </AnimatePresence>
 
+        {/* Guide Modal */}
+        <AnimatePresence>
+          {showGuideModal && (
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-slate-900/50 z-50 flex items-center justify-center p-4"
+              onClick={() => setShowGuideModal(false)}
+            >
+              <motion.div 
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                onClick={(e) => e.stopPropagation()}
+                className="bg-white rounded-2xl shadow-xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]"
+              >
+                <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+                  <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+                    <AlertCircle className="text-emerald-600" />
+                    使用指南
+                  </h2>
+                  <button 
+                    onClick={() => setShowGuideModal(false)}
+                    className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-200 rounded-lg transition-colors"
+                  >
+                    <X size={20} />
+                  </button>
+                </div>
+                
+                <div className="p-6 overflow-y-auto flex-1 text-slate-600 text-sm leading-relaxed space-y-6">
+                  
+                  <section>
+                    <h3 className="text-base font-bold text-slate-800 mb-3 flex items-center gap-2">
+                      <div className="w-6 h-6 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center text-xs">1</div>
+                      什麼是 Ollama？
+                    </h3>
+                    <p className="mb-2">
+                      Ollama 是一個可以讓你在「自己的電腦上」執行大型語言模型（例如 Llama 3, Mistral 等）的工具。
+                      它的最大優點是「完全免費、保護隱私（資料不會上傳到雲端），且不需要網路連線」即可運作。
+                    </p>
+                    <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                      <p className="font-medium text-slate-700 mb-2">如何安裝與啟動 Ollama：</p>
+                      <ol className="list-decimal list-inside space-y-1 ml-2">
+                        <li>前往 <a href="https://ollama.com/" target="_blank" rel="noreferrer" className="text-emerald-600 hover:underline">Ollama 官方網站</a> 下載並安裝。</li>
+                        <li>打開終端機 (Terminal) 或命令提示字元 (CMD)。</li>
+                        <li>輸入指令下載模型：<code className="bg-slate-200 px-1.5 py-0.5 rounded text-emerald-700">ollama run llama3</code> (或你喜歡的模型)。</li>
+                        <li>「重要」：為了讓此網頁能連線到 Ollama，你需要設定環境變數 <code className="bg-slate-200 px-1.5 py-0.5 rounded text-emerald-700">OLLAMA_ORIGINS="*"</code> 後再啟動 Ollama 服務。</li>
+                      </ol>
+                    </div>
+                  </section>
+
+                  <section>
+                    <h3 className="text-base font-bold text-slate-800 mb-3 flex items-center gap-2">
+                      <div className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs">2</div>
+                      什麼是 Gemini API？
+                    </h3>
+                    <p className="mb-2">
+                      Gemini 是 Google 開發的強大雲端 AI 模型。當你無法在本地執行 Ollama，或者需要更強大的推理能力（例如圖片辨識）時，可以使用 Gemini。
+                    </p>
+                    <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                      <p className="font-medium text-slate-700 mb-2">如何獲取 Gemini API Key：</p>
+                      <ol className="list-decimal list-inside space-y-1 ml-2">
+                        <li>前往 <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">Google AI Studio</a>。</li>
+                        <li>登入你的 Google 帳號。</li>
+                        <li>點擊 "Create API key" 按鈕。</li>
+                        <li>複製產生的金鑰，並貼到本應用程式右上角的「配置金鑰」設定中。</li>
+                      </ol>
+                    </div>
+                  </section>
+
+                  <section>
+                    <h3 className="text-base font-bold text-slate-800 mb-3 flex items-center gap-2">
+                      <div className="w-6 h-6 rounded-full bg-purple-100 text-purple-700 flex items-center justify-center text-xs">3</div>
+                      系統如何選擇 AI？
+                    </h3>
+                    <p>
+                      本系統採用「智慧切換機制」：
+                    </p>
+                    <ul className="list-disc list-inside space-y-2 mt-2 ml-2">
+                      <li>
+                        <span className="font-medium text-slate-700">優先使用 Ollama：</span> 
+                        系統會持續偵測本地端的 Ollama 服務 (預設 <code className="bg-slate-100 px-1 py-0.5 rounded">http://127.0.0.1:11434</code>)。如果偵測到 Ollama 正在運行，所有文字對話將優先透過 Ollama 處理，以確保您的隱私。
+                      </li>
+                      <li>
+                        <span className="font-medium text-slate-700">自動切換 Gemini：</span>
+                        如果 Ollama 未啟動，且您已設定了有效的 Gemini API Key，系統會自動將請求發送給 Gemini 處理。
+                      </li>
+                      <li>
+                        <span className="font-medium text-slate-700">圖片辨識專屬：</span>
+                        由於目前的本地模型配置，「藥物辨識」功能強制使用 Gemini 雲端 AI 進行圖片分析。請確保您已配置 Gemini API Key 以使用此功能。
+                      </li>
+                    </ul>
+                  </section>
+
+                </div>
+                
+                <div className="p-4 border-t border-slate-100 bg-slate-50 flex justify-end">
+                  <button 
+                    onClick={() => setShowGuideModal(false)}
+                    className="px-6 py-2 bg-emerald-600 text-white rounded-xl text-sm font-bold hover:bg-emerald-700 transition-colors"
+                  >
+                    我了解了
+                  </button>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Disclaimer Modal */}
+        <AnimatePresence>
+          {showDisclaimerModal && (
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-slate-900/50 z-50 flex items-center justify-center p-4"
+            >
+              <motion.div 
+                initial={{ scale: 0.95, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.95, opacity: 0 }}
+                className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden flex flex-col"
+              >
+                <div className="p-6 border-b border-slate-100 flex items-center gap-3 bg-amber-50">
+                  <AlertCircle className="text-amber-600" size={24} />
+                  <h2 className="text-xl font-bold text-slate-800">醫療免責聲明</h2>
+                </div>
+                
+                <div className="p-6 text-slate-600 text-sm leading-relaxed">
+                  <p>
+                    本系統由 AI 技術生成，分析結果僅供參考，不具備醫療診斷與處方權。若有任何身體不適，請務必諮詢專業醫療人員。
+                  </p>
+                </div>
+                
+                <div className="p-4 border-t border-slate-100 bg-slate-50 flex justify-end">
+                  <button 
+                    onClick={() => {
+                      setShowDisclaimerModal(false);
+                      localStorage.setItem('disclaimerAcceptedAt', Date.now().toString());
+                    }}
+                    className="px-6 py-2 bg-emerald-600 text-white rounded-xl text-sm font-bold hover:bg-emerald-700 transition-colors"
+                  >
+                    我同意並了解
+                  </button>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Content Area */}
         <div className="flex-1 overflow-y-auto p-6">
           <div className="max-w-4xl mx-auto h-full flex flex-col">
             <AnimatePresence mode="wait">
               {activeTab === 'chat' && (
-                <motion.div key="chat" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} className="flex-1 flex flex-col gap-4">
+                <motion.div 
+                  key="chat"
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  className="flex-1 flex flex-col gap-4"
+                >
                   {messages.length === 0 ? (
                     <div className="flex-1 flex flex-col items-center justify-center text-center p-12 space-y-6">
-                      <div className="w-20 h-20 bg-emerald-100 rounded-full flex items-center justify-center text-emerald-600"><MessageSquare size={40} /></div>
-                      <div className="max-w-md"><h2 className="text-2xl font-bold text-slate-900 mb-2">開始您的專業諮詢</h2><p className="text-slate-500">您可以上傳照片或輸入嬰幼兒健康問題。</p></div>
+                      <div className="w-20 h-20 bg-emerald-100 rounded-full flex items-center justify-center text-emerald-600">
+                        <MessageSquare size={40} />
+                      </div>
+                      <div className="max-w-md">
+                        <h2 className="text-2xl font-bold text-slate-900 mb-2">開始您的專業諮詢</h2>
+                        <p className="text-slate-500">您可以點擊上方標籤上傳藥物照片，或直接在此輸入嬰幼兒的健康問題。</p>
+                      </div>
+                      <div className="grid grid-cols-2 gap-4 w-full max-w-lg">
+                        <button onClick={() => setActiveTab('medication')} className="p-4 bg-white border border-slate-200 rounded-2xl hover:border-emerald-500 transition-all text-left group">
+                          <Pill className="text-emerald-600 mb-2 group-hover:scale-110 transition-transform" />
+                          <div className="font-semibold">辨識藥物風險</div>
+                          <div className="text-xs text-slate-400">上傳藥袋或藥瓶照片</div>
+                        </button>
+                        <button onClick={() => setActiveTab('symptoms')} className="p-4 bg-white border border-slate-200 rounded-2xl hover:border-emerald-500 transition-all text-left group">
+                          <AlertCircle className="text-amber-500 mb-2 group-hover:scale-110 transition-transform" />
+                          <div className="font-semibold">症狀用藥建議</div>
+                          <div className="text-xs text-slate-400">針對嬰兒症狀快速查詢</div>
+                        </button>
+                      </div>
                     </div>
                   ) : (
                     <div className="space-y-6 pb-24">
                       {messages.map((msg, i) => (
-                        <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} items-end gap-2`}>
-                          {msg.role === 'assistant' && (
-                            <button
-                              onClick={() => speakingId === i ? stopSpeech() : speakText(msg.content.replace(/[#*`>\[\]]/g, ''), i)}
-                              title={speakingId === i ? '停止朗讀' : '朗讀此訊息'}
-                              className={`shrink-0 mb-1 p-1.5 rounded-full transition-all ${
-                                speakingId === i
-                                  ? 'bg-emerald-100 text-emerald-600 animate-pulse'
-                                  : 'bg-slate-100 text-slate-400 hover:bg-emerald-50 hover:text-emerald-600'
-                              }`}
-                            >
-                              {speakingId === i ? <VolumeX size={14} /> : <Volume2 size={14} />}
-                            </button>
-                          )}
-                          <div className={`max-w-[85%] p-4 rounded-2xl shadow-sm ${msg.role === 'user' ? 'bg-emerald-600 text-white rounded-tr-none' : 'bg-white border border-slate-100 rounded-tl-none'}`}>
-                            <ErrorBoundary fallbackContent={msg.content || '未提供內容'}>
-                              <MarkdownRenderer content={msg.content || ' '} />
-                            </ErrorBoundary>
+                        <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                          <div className={`max-w-[85%] p-4 rounded-2xl shadow-sm relative ${msg.role === 'user' ? 'bg-emerald-600 text-white rounded-tr-none' : 'bg-white border border-slate-100 rounded-tl-none'}`}>
+                            {msg.role === 'assistant' && (
+                              <div className="flex justify-between items-start mb-2">
+                                {speakingText === msg.content ? (
+                                  <div className="flex items-end gap-0.5 h-4">
+                                    <div className="wave-bar"></div>
+                                    <div className="wave-bar"></div>
+                                    <div className="wave-bar"></div>
+                                    <div className="wave-bar"></div>
+                                  </div>
+                                ) : <div />}
+                                <button 
+                                  onClick={() => speak(msg.content)}
+                                  className="p-1 text-slate-400 hover:text-emerald-600 transition-colors"
+                                  title={speakingText === msg.content ? "停止播放" : "語音播放"}
+                                >
+                                  {speakingText === msg.content ? <Square size={14} fill="currentColor" /> : <Volume2 size={14} />}
+                                </button>
+                              </div>
+                            )}
+                            <div className="prose prose-slate max-w-none prose-sm">
+                              {msg.content.split('\n').map((line, j) => (
+                                <p key={j} className="mb-1">{line}</p>
+                              ))}
+                            </div>
                           </div>
                         </div>
                       ))}
-                      {isLoading && <div className="flex justify-start"><div className="bg-white border border-slate-100 p-4 rounded-2xl flex items-center gap-2"><Loader2 size={16} className="animate-spin text-emerald-600" /><span className="text-sm text-slate-500">正在分析中...</span></div></div>}
+                      {isLoading && (
+                        <div className="flex justify-start">
+                          <div className="bg-white border border-slate-100 p-4 rounded-2xl rounded-tl-none flex items-center gap-2">
+                            <Loader2 size={16} className="animate-spin text-emerald-600" />
+                            <span className="text-sm text-slate-500">正在分析中...</span>
+                          </div>
+                        </div>
+                      )}
                       <div ref={messagesEndRef} />
                     </div>
                   )}
@@ -717,244 +1133,290 @@ export default function App() {
               )}
 
               {activeTab === 'medication' && (
-                <motion.div key="medication" initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} className="flex-1 flex flex-col items-center justify-center">
+                <motion.div 
+                  key="medication"
+                  initial={{ opacity: 0, scale: 0.95 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.95 }}
+                  className="flex-1 flex flex-col items-center justify-center"
+                >
                   <div className="w-full max-w-2xl bg-white p-8 rounded-3xl shadow-xl border border-slate-100">
-                    <h2 className="text-2xl font-bold text-center mb-6">藥物辨識與翻譯分析</h2>
+                    <div className="text-center mb-6">
+                      <h2 className="text-2xl font-bold text-slate-900 mb-2">藥物辨識與翻譯分析</h2>
+                      <p className="text-slate-500">支援多國語言翻譯，請選擇拍照或上傳檔案。</p>
+                    </div>
+
+                    <div className="mb-6">
+                      <label className="block text-sm font-semibold text-slate-700 mb-2">翻譯目標語言</label>
+                      <select 
+                        value={targetLanguage}
+                        onChange={(e) => setTargetLanguage(e.target.value)}
+                        className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500"
+                      >
+                        <option value="繁體中文">繁體中文</option>
+                        <option value="簡體中文">簡體中文</option>
+                        <option value="English">English</option>
+                        <option value="日本語">日本語</option>
+                        <option value="Tiếng Việt">Tiếng Việt</option>
+                      </select>
+                    </div>
+
                     <div className="grid grid-cols-2 gap-4 mb-8">
                       {medFiles.map(file => (
-                        <div key={file.id} className="relative aspect-video rounded-xl overflow-hidden border border-slate-200">
+                        <div key={file.id} className="relative aspect-video rounded-xl overflow-hidden border border-slate-200 group">
                           <img src={file.preview} alt="preview" className="w-full h-full object-cover" />
-                          <button onClick={() => removeFile(file.id)} className="absolute top-2 right-2 p-1 bg-red-500 text-white rounded-full"><X size={14} /></button>
+                          <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                            <span className="text-white text-xs font-medium truncate px-2">{file.name}</span>
+                          </div>
+                          <button 
+                            onClick={() => removeFile(file.id)}
+                            className="absolute top-2 right-2 p-1.5 bg-red-500 text-white rounded-full shadow-md"
+                          >
+                            <X size={14} />
+                          </button>
                         </div>
                       ))}
+                      
                       {medFiles.length < 4 && (
                         <>
-                          <input
-                            type="file"
-                            ref={fileInputRef}
-                            onChange={handleFileUpload}
-                            accept="image/*"
-                            multiple
-                            className="hidden"
-                          />
-                          <button onClick={() => fileInputRef.current?.click()} className="aspect-video rounded-xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center gap-2 hover:bg-emerald-50 text-slate-400 hover:text-emerald-600">
-                            <Upload size={32} />
-                            <span>上傳圖片</span>
-                          </button>
-                          <button onClick={startCamera} className="aspect-video rounded-xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center gap-2 hover:bg-emerald-50 text-slate-400 hover:text-emerald-600">
+                          <button 
+                            onClick={startCamera}
+                            className="aspect-video rounded-xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center gap-2 hover:border-emerald-500 hover:bg-emerald-50 transition-all text-slate-400 hover:text-emerald-600"
+                          >
                             <Camera size={32} />
-                            <span>拍照</span>
+                            <span className="text-sm font-medium">拍照辨識</span>
+                          </button>
+                          <button 
+                            onClick={() => fileInputRef.current?.click()}
+                            className="aspect-video rounded-xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center gap-2 hover:border-emerald-500 hover:bg-emerald-50 transition-all text-slate-400 hover:text-emerald-600"
+                          >
+                            <Upload size={32} />
+                            <span className="text-sm font-medium">上傳檔案</span>
                           </button>
                         </>
                       )}
                     </div>
-                    <button onClick={handleAnalyzeMedications} disabled={medFiles.length === 0 || isLoading} className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-2">{isLoading ? <Loader2 className="animate-spin" /> : <Upload size={20} />}開始辨識</button>
+
+                    <input 
+                      type="file" 
+                      ref={fileInputRef} 
+                      onChange={handleFileUpload} 
+                      accept="image/*,application/pdf" 
+                      multiple 
+                      className="hidden" 
+                    />
+
+                    <button 
+                      onClick={handleAnalyzeMedications}
+                      disabled={medFiles.length === 0 || isLoading}
+                      className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white py-4 rounded-2xl font-bold text-lg transition-all shadow-lg flex items-center justify-center gap-2"
+                    >
+                      {isLoading ? <Loader2 className="animate-spin" /> : <Upload size={20} />}
+                      開始辨識與翻譯
+                    </button>
                   </div>
+
+                  {/* Camera Modal */}
                   {showCamera && (
-                    <div className="fixed inset-0 bg-black z-[2000] flex flex-col items-center justify-center overflow-hidden">
-                      <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" />
-                      
-                      {/* Shutter Flash Effect */}
-                      <AnimatePresence>
-                        {isFlashing && (
-                          <motion.div 
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            exit={{ opacity: 0 }}
-                            className="absolute inset-0 bg-white z-[2500]"
-                          />
-                        )}
-                      </AnimatePresence>
-
-                      <canvas ref={canvasRef} className="hidden" />
-                      
-                      {/* Close Button */}
-                      <button 
-                        onClick={stopCamera} 
-                        className="absolute top-10 right-8 p-3 bg-black/40 text-white rounded-full z-[2200] hover:bg-black/60 transition-all backdrop-blur-md border border-white/20 pointer-events-auto"
-                      >
-                        <X size={32} />
-                      </button>
-
-                      {/* Capture Button Container */}
-                      <div className="absolute bottom-16 flex items-center justify-center w-full z-[2200] pointer-events-none">
-                        <button 
-                          onClick={takePhoto} 
-                          className="w-24 h-24 bg-white border-[6px] border-slate-200/50 rounded-full shadow-[0_0_30px_rgba(255,255,255,0.4)] active:scale-90 transition-all pointer-events-auto flex items-center justify-center"
-                        >
-                          <div className="w-16 h-16 bg-white border-2 border-slate-100 rounded-full" />
-                        </button>
+                    <div className="fixed inset-0 bg-black z-50 flex flex-col">
+                      <div className="flex-1 relative flex items-center justify-center">
+                        <video ref={videoRef} autoPlay playsInline className="max-h-full max-w-full" />
+                        <canvas ref={canvasRef} className="hidden" />
                       </div>
-                      <div className="absolute bottom-6 text-white/60 text-xs font-medium z-[2200]">請對準藥物標籤拍照</div>
+                      <div className="h-32 bg-slate-900 flex items-center justify-around px-8">
+                        <button onClick={stopCamera} className="p-4 text-white hover:bg-white/10 rounded-full">
+                          <X size={32} />
+                        </button>
+                        <button onClick={takePhoto} className="w-20 h-20 bg-white rounded-full border-4 border-slate-400 flex items-center justify-center">
+                          <div className="w-16 h-16 bg-white rounded-full border-2 border-slate-900" />
+                        </button>
+                        <div className="w-12" /> {/* Spacer */}
+                      </div>
                     </div>
                   )}
                 </motion.div>
               )}
 
-               {activeTab === 'symptoms' && (
-                <motion.div key="symptoms" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="flex-1 flex flex-col pt-4 overflow-hidden">
-                  <div className="flex-1 overflow-y-auto space-y-6 mb-4 pr-2 custom-scrollbar pb-10">
-                    {messages.length === 0 ? (
-                      <div className="bg-white p-8 rounded-3xl shadow-sm border border-slate-100 max-w-2xl mx-auto mt-10">
-                        <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center text-emerald-600 mx-auto mb-4">
-                          <Stethoscope size={30} />
-                        </div>
-                        <h2 className="text-xl font-bold text-center mb-2">開始您的症狀諮詢</h2>
-                        <p className="text-slate-500 text-center text-sm mb-6">請描述您的症狀，醫師將為您提供即時建議。</p>
-                        <div className="bg-blue-50 p-4 rounded-xl border border-blue-100 mb-6">
-                          <p className="text-[11px] text-blue-700 leading-relaxed font-medium">注意：系統會根據您的描述提供建議。如果是第一次對話，且未提供年齡，醫師將會主動詢問您以提供準確方案。</p>
-                        </div>
+              {activeTab === 'symptoms' && (
+                <motion.div 
+                  key="symptoms"
+                  initial={{ opacity: 0, x: 20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -20 }}
+                  className="flex-1 flex flex-col items-center"
+                >
+                  <div className="w-full max-w-2xl bg-white p-8 rounded-3xl shadow-xl border border-slate-100 mb-6">
+                    <div className="text-center mb-8">
+                      <h2 className="text-2xl font-bold text-slate-900 mb-2">智慧醫療助理</h2>
+                      <p className="text-slate-500">請描述您的症狀，AI 將為您提供建議，並建議您諮詢專業醫生。</p>
+                    </div>
+
+                    <div className="space-y-6">
+                      <div>
+                        <label className="block text-sm font-semibold text-slate-700 mb-2">症狀描述</label>
+                        <textarea 
+                          className="w-full h-32 p-4 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition-all outline-none resize-none"
+                          placeholder="例如：頭痛、發燒、咳嗽等..."
+                          id="symptomInput"
+                        ></textarea>
                       </div>
-                    ) : (
-                      messages.map((msg, i) => {
-                        const parts = msg.content.split('---');
-                        const hasTabs = parts.length >= 2 && msg.role === 'assistant';
 
-                        return (
-                          <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} items-end gap-2`}>
-                            <div className={`max-w-[90%] p-4 rounded-2xl shadow-sm ${msg.role === 'user' ? 'bg-emerald-600 text-white rounded-tr-none' : 'bg-white text-slate-800 border border-slate-100 rounded-tl-none'}`}>
-                              {hasTabs && (
-                                <div className="flex bg-slate-100 p-1 rounded-xl mb-4 w-fit">
-                                  <button onClick={() => setActiveSymptomTab('quick')} className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${activeSymptomTab === 'quick' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>{parts.length >= 2 ? '快速摘要' : '完整回覆'}</button>
-                                  {parts.length >= 2 && (
-                                    <button onClick={() => setActiveSymptomTab('deep')} className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${activeSymptomTab === 'deep' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>詳細分析</button>
-                                  )}
-                                </div>
-                              )}
-                              <ErrorBoundary fallbackContent={msg.content}>
-                                <MarkdownRenderer content={hasTabs ? (activeSymptomTab === 'quick' ? parts[0] : (parts[1] || parts[0])) : msg.content} />
-                              </ErrorBoundary>
-                            </div>
+                      <div className="flex gap-4">
+                        <button 
+                          onClick={() => setSymptomMode('concise')}
+                          className={`flex-1 py-3 rounded-xl font-medium border transition-all ${symptomMode === 'concise' ? 'bg-emerald-50 border-emerald-500 text-emerald-700' : 'bg-white border-slate-200 text-slate-500'}`}
+                        >
+                          簡潔版建議
+                        </button>
+                        <button 
+                          onClick={() => setSymptomMode('detailed')}
+                          className={`flex-1 py-3 rounded-xl font-medium border transition-all ${symptomMode === 'detailed' ? 'bg-emerald-50 border-emerald-500 text-emerald-700' : 'bg-white border-slate-200 text-slate-500'}`}
+                        >
+                          詳細版建議
+                        </button>
+                      </div>
+
+                      <button 
+                        onClick={() => {
+                          const val = (document.getElementById('symptomInput') as HTMLTextAreaElement).value;
+                          handleSymptomSubmit(val);
+                        }}
+                        disabled={isLoading}
+                        className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white py-4 rounded-2xl font-bold text-lg transition-all shadow-lg flex items-center justify-center gap-2"
+                      >
+                        {isLoading ? <Loader2 className="animate-spin" /> : <ChevronRight size={20} />}
+                        獲取建議
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Inline Result Display */}
+                  <AnimatePresence>
+                    {symptomResult && (
+                      <motion.div 
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="w-full max-w-2xl bg-white p-8 rounded-3xl shadow-lg border border-emerald-100"
+                      >
+                        <div className="flex items-center justify-between mb-4">
+                          <div className="flex items-center gap-2 text-emerald-600">
+                            <Stethoscope size={20} />
+                            <h3 className="font-bold text-lg">專業建議結果</h3>
                           </div>
-                        );
-                      })
+                          <div className="flex items-center gap-4">
+                            {speakingText === symptomResult && (
+                              <div className="flex items-end gap-0.5 h-4">
+                                <div className="wave-bar"></div>
+                                <div className="wave-bar"></div>
+                                <div className="wave-bar"></div>
+                                <div className="wave-bar"></div>
+                              </div>
+                            )}
+                            <button 
+                              onClick={() => speak(symptomResult)}
+                              className="p-2 bg-emerald-50 text-emerald-600 rounded-xl hover:bg-emerald-100 transition-all shadow-sm"
+                              title={speakingText === symptomResult ? "停止播放" : "語音播放"}
+                            >
+                              {speakingText === symptomResult ? <Square size={18} fill="currentColor" /> : <Volume2 size={18} />}
+                            </button>
+                          </div>
+                        </div>
+                        <div className="prose prose-slate max-w-none">
+                          {symptomResult.split('\n').map((line, i) => (
+                            <p key={i} className="mb-2 text-slate-700">{line}</p>
+                          ))}
+                        </div>
+                        <div className="mt-6 pt-6 border-t border-slate-100 flex justify-between items-center">
+                          <span className="text-xs text-slate-400">此建議已同步儲存至對話紀錄</span>
+                          <button 
+                            onClick={() => setActiveTab('chat')}
+                            className="text-emerald-600 text-sm font-semibold hover:underline"
+                          >
+                            前往對話詳談
+                          </button>
+                        </div>
+                      </motion.div>
                     )}
-                    {isLoading && <div className="flex justify-start"><div className="bg-white border border-emerald-100 p-4 rounded-2xl flex items-center gap-2"><Loader2 size={16} className="animate-spin text-emerald-600" /><span className="text-sm text-slate-500">醫師正在診斷中...</span></div></div>}
-                    <div ref={messagesEndRef} />
-                  </div>
-
-                  <div className="bg-white p-4 rounded-3xl shadow-xl border border-slate-100 flex items-end gap-3 max-w-3xl mx-auto w-full mb-6">
-                    <textarea 
-                      className="flex-1 bg-slate-50 border-none rounded-2xl p-3 text-sm focus:ring-2 focus:ring-emerald-500 min-h-[44px] max-h-32 outline-none resize-none"
-                      placeholder="請輸入症狀或追蹤問題..."
-                      value={symptomInput}
-                      onChange={(e) => setSymptomInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                          e.preventDefault();
-                          handleSymptomSubmit(symptomInput);
-                        }
-                      }}
-                    />
-                    <button 
-                      onClick={() => handleSymptomSubmit(symptomInput)}
-                      disabled={!symptomInput.trim() || isLoading}
-                      className="bg-emerald-600 text-white p-3 rounded-2xl disabled:bg-slate-200 transition-all hover:bg-emerald-700 shadow-lg shadow-emerald-200 shrink-0"
-                    >
-                      {isLoading ? <Loader2 className="animate-spin" size={20} /> : <Send size={20} />}
-                    </button>
-                  </div>
+                  </AnimatePresence>
                 </motion.div>
               )}
             </AnimatePresence>
           </div>
         </div>
 
+        {/* Input Bar (Only in Chat Tab) */}
         {activeTab === 'chat' && currentSessionId && (
-          <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-[#F8FAFC] to-transparent">
+          <div className="absolute bottom-0 left-0 right-0 p-6 bg-gradient-to-t from-[#F8FAFC] via-[#F8FAFC] to-transparent">
             <div className="max-w-4xl mx-auto relative">
-              <input
-                type="text"
+              <input 
+                type="text" 
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
                 onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
-                placeholder={
-                  isListening 
-                    ? '正在聆聽中，請說話...' 
-                    : activeTab === 'chat' 
-                      ? '輸入問題（一般助手模式），或按麥克風說話...' 
-                      : activeTab === 'symptoms' 
-                        ? '請輸入症狀（醫療顧問模式），或按麥克風說話...'
-                        : '輸入問題，或按麥克風說話...'
-                }
-                className={`w-full bg-white border rounded-2xl py-4 pl-6 shadow-lg outline-none transition-all ${
-                  isListening ? 'border-red-400 ring-2 ring-red-200 pr-28' : 'border-slate-200 pr-24'
-                }`}
+                placeholder="輸入您的問題..."
+                className="w-full bg-white border border-slate-200 rounded-2xl py-4 pl-6 pr-28 shadow-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent transition-all outline-none"
               />
-              {/* Mic button */}
-              {speechInputSupported && (
-                <button
-                  onClick={isListening ? stopListening : startListening}
-                  title={isListening ? '停止錄音' : '語音輸入'}
-                  className={`absolute right-14 top-1/2 -translate-y-1/2 p-2.5 rounded-xl transition-all ${
-                    isListening
-                      ? 'bg-red-500 text-white animate-pulse shadow-lg shadow-red-200'
-                      : 'bg-slate-100 text-slate-500 hover:bg-slate-200'
-                  }`}
+              <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-2">
+                <button 
+                  onClick={startListening}
+                  className={`p-2.5 rounded-xl transition-all shadow-md ${isListening ? 'bg-red-500 text-white animate-pulse' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+                  title="語音輸入"
                 >
-                  {isListening ? <MicOff size={18} /> : <Mic size={18} />}
+                  <Mic size={20} />
                 </button>
-              )}
-              {/* Send button */}
-              <button
-                onClick={handleSendMessage}
-                disabled={!inputText.trim() || isLoading}
-                className="absolute right-3 top-1/2 -translate-y-1/2 p-2.5 bg-emerald-600 text-white rounded-xl disabled:bg-slate-300 transition-colors"
-              >
-                <Send size={20} />
-              </button>
+                <button 
+                  onClick={handleSendMessage}
+                  disabled={!inputText.trim() || isLoading}
+                  className="p-2.5 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 disabled:bg-slate-300 transition-all shadow-md"
+                >
+                  <Send size={20} />
+                </button>
+              </div>
             </div>
-            {isListening && (
-              <p className="text-center text-xs text-red-500 mt-2 animate-pulse font-medium">● 錄音中... 說完後請按麥克風停止</p>
-            )}
           </div>
         )}
       </main>
 
-      {/* Modals */}
+      {/* Rename Dialog */}
       <AnimatePresence>
         {isRenameDialogOpen && (
           <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="bg-white rounded-2xl p-6 w-full max-w-md">
-              <h3 className="text-lg font-bold mb-4">重新命名對話</h3>
-              <input type="text" value={newTitle} onChange={(e) => setNewTitle(e.target.value)} className="w-full p-2 border rounded-lg mb-4" />
-              <div className="flex gap-2"><button onClick={() => setIsRenameDialogOpen(false)} className="flex-1 py-2">取消</button><button onClick={handleRename} className="flex-1 py-2 bg-emerald-600 text-white rounded-xl">確認</button></div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
-
-      <AnimatePresence>
-        {showReadme && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} onClick={() => setShowReadme(false)} className="absolute inset-0 bg-black/40" />
-            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="relative bg-white w-full max-w-4xl max-h-[80vh] rounded-3xl overflow-hidden flex flex-col p-6">
-              <div className="flex justify-between items-center mb-4"><h2 className="text-xl font-bold">使用指南</h2><button onClick={() => setShowReadme(false)}><X /></button></div>
-              <div className="flex-1 overflow-y-auto">
-                <ErrorBoundary fallbackContent={readmeContent}>
-                  <MarkdownRenderer content={readmeContent || ' '} />
-                </ErrorBoundary>
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden"
+            >
+              <div className="p-6">
+                <h3 className="text-lg font-bold text-slate-900 mb-4">重新命名對話</h3>
+                <input 
+                  type="text" 
+                  value={newTitle}
+                  onChange={(e) => setNewTitle(e.target.value)}
+                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500"
+                  placeholder="輸入新標題..."
+                  autoFocus
+                  onKeyPress={(e) => e.key === 'Enter' && handleRename()}
+                />
+              </div>
+              <div className="flex border-t border-slate-100">
+                <button 
+                  onClick={() => setIsRenameDialogOpen(false)}
+                  className="flex-1 py-4 text-slate-500 font-medium hover:bg-slate-50 transition-colors"
+                >
+                  取消
+                </button>
+                <button 
+                  onClick={handleRename}
+                  className="flex-1 py-4 text-emerald-600 font-bold hover:bg-emerald-50 transition-colors border-l border-slate-100"
+                >
+                  確認
+                </button>
               </div>
             </motion.div>
           </div>
         )}
       </AnimatePresence>
-
-      <AnimatePresence>
-        {!hasAcceptedDisclaimer && (
-          <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-md">
-            <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} className="bg-white w-full max-w-lg rounded-3xl p-8 text-center shadow-2xl">
-              <div className="w-16 h-16 bg-amber-100 text-amber-600 rounded-full flex items-center justify-center mx-auto mb-6"><AlertCircle size={32} /></div>
-              <h2 className="text-2xl font-bold mb-4">醫療免責聲明</h2>
-              <p className="text-sm text-slate-600 mb-8 text-left bg-slate-50 p-6 rounded-2xl">
-                生成的建議僅供學術參考，不能替代專業醫師診斷。若有健康問題，請務必諮詢合格醫生。
-              </p>
-              <button onClick={() => setHasAcceptedDisclaimer(true)} className="w-full py-4 bg-emerald-600 text-white rounded-2xl font-bold">我已閱讀並同意</button>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
-      </div>
-    </ErrorBoundary>
+    </div>
   );
 }
