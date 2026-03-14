@@ -15,6 +15,27 @@ const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ─── Mode Specific System Prompts ───────────────────────────────────────────
+const CHAT_SYSTEM_PROMPT = "【強制規範：全程使用繁體中文，嚴禁任何簡體字】你是一位親切且專業的全齡醫療與生活助手。請提供正確且有溫度的建議。注意：在回答中絕對不要使用 ** 符號。若要強調重點，請將其放在『 』括號內。絕對不要推銷任何 AI 產品。若使用者詢問與醫療無關的問題，請以專業助手的角度回答。再次強調：回覆必須文字完全為繁體中文。";
+
+const SYMPTOM_SYSTEM_PROMPT = `【強制規範：全程使用繁體中文，嚴禁任何簡體字，必須使用 --- 標籤】
+你是一位專業的家庭醫師。請針對使用者的症狀提供建議。
+  
+要求：
+1. 回覆結構：你「必須」使用 --- 符號將回覆分為兩個部分。
+   第一部分是 [ 快速摘要 ]：提供 100 字以內的精簡結論與緊急處置。
+   第二部分是 [ 深度分析 ]：提供詳細的病因分析、護理指南與長期觀察建議。
+   注意：如果沒有 --- 符號，介面將無法正確顯示與標籤切換。
+2. 身分與年齡邏輯：
+   - 階段一（未知年齡）：如果在對話歷史中找不到使用者的年齡或出生年月日，你必須在回覆開頭禮貌地詢問「請問患者的年齡或出生年月日？」。
+   - 階段二（已知年齡）：一旦使用者提供資訊（如「2006年9月27日」），你必須立即計算當前年齡（目前為 19 歲），並將後續所有建議鎖定在此年齡層。
+3. 精準醫療：嚴禁提供不符合該年齡層的醫學資訊。例如使用者是 19 歲成年人，不准出現乳汁過多、嬰幼兒照護或不相關的兒童藥物建議。
+4. 格式：使用「條列式」與表格排版。
+5. 語言規範：回覆文字「必須完全為繁體中文」，嚴禁出現任何簡體字（如：体、国、学、会等）。絕對不要使用 ** 符號，請使用『 』強調。
+6. 警示：若情況緊急，必須提醒立即就醫。
+
+再次強調：回覆必須包含 --- 分隔符號，且文字必須完全身為繁體中文。`;
+
 const db = new Database("medsafe.db");
 
 // ─── WAL mode for better concurrency ─────────────────────────────────────────
@@ -422,8 +443,19 @@ async function startServer() {
     const nvidiaKey  = process.env.NVIDIA_API_KEY;
 
     // Handle both old 'prompt' string and new 'messages' array formats
+    const { mode } = req.body;
     const messages = req.body.messages || [];
     let textPrompt = req.body.prompt || "";
+
+    // Determine system prompt based on mode
+    let systemInstruction = req.body.system; // Allow override from request
+    if (!systemInstruction) {
+      if (mode === 'symptoms') {
+        systemInstruction = SYMPTOM_SYSTEM_PROMPT;
+      } else if (mode === 'chat') {
+        systemInstruction = CHAT_SYSTEM_PROMPT;
+      }
+    }
     
     // If no explicit prompt string, try to extract from the last user message
     if (!textPrompt && messages.length > 0) {
@@ -454,7 +486,7 @@ async function startServer() {
             model: "llama3.2:3b",
             prompt: textPrompt.substring(0, 8000), 
             stream: false,
-            system: typeof req.body.system === 'string' ? req.body.system.substring(0, 2000) : ""
+            system: systemInstruction || ""
           }),
         });
         if (genRes.ok) {
@@ -468,8 +500,13 @@ async function startServer() {
     if (groqApiKey) {
       try {
         const groqMessages = messages.length > 0 ? messages : [
-          ...(req.body.system ? [{ role: "system", content: req.body.system }] : []),
           { role: "user", content: textPrompt }
+        ];
+
+        // Prepend system instruction if not already present in history
+        const finalGroqMessages = [
+          ...(systemInstruction ? [{ role: "system", content: systemInstruction }] : []),
+          ...groqMessages
         ];
         
         // Remove image URLs from Groq as it (typically) doesn't support vision in this free endpoint
@@ -481,7 +518,7 @@ async function startServer() {
         const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${groqApiKey}` },
-          body: JSON.stringify({ model: req.body.model || "llama-3.1-8b-instant", messages: safeGroqMessages, temperature: 0.7, max_tokens: 2048 }),
+          body: JSON.stringify({ model: req.body.model || "llama-3.1-70b-versatile", messages: finalGroqMessages, temperature: 0.7, max_tokens: 2048 }),
         });
         if (groqRes.ok) {
           const data = await groqRes.json();
@@ -494,18 +531,25 @@ async function startServer() {
     if (nvidiaKey) {
       try {
         const nvMessages = messages.length > 0 ? messages : [
-          ...(req.body.system ? [{ role: "system", content: req.body.system }] : []),
           { role: "user", content: textPrompt }
         ];
         
         const nvModel = req.body.model || (messages.some((m: any) => Array.isArray(m.content) && m.content.some((c: any) => c.type === 'image_url')) 
           ? "meta/llama-3.2-90b-vision-instruct" 
-          : "meta/llama-3.1-8b-instruct");
+          : "meta/llama-3.1-70b-instruct");
 
         const nvRes = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${nvidiaKey}` },
-          body: JSON.stringify({ model: nvModel, messages: nvMessages, temperature: 0.7, max_tokens: 2048 }),
+          body: JSON.stringify({ 
+            model: nvModel, 
+            messages: [
+              ...(systemInstruction ? [{ role: "system", content: systemInstruction }] : []),
+              ...nvMessages
+            ], 
+            temperature: 0.7, 
+            max_tokens: 2048 
+          }),
         });
         
         if (nvRes.ok) {

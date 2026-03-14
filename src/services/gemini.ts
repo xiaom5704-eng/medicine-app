@@ -1,6 +1,7 @@
-const callUnifiedAPI = async (messages: { role: string; content: string | any[] }[], system: string | undefined, model: string, apiKey: string | undefined) => {
+const callUnifiedAPI = async (messages: { role: string; content: string | any[] }[], system: string | undefined, model: string, apiKey: string | undefined, mode?: string) => {
   try {
     const payload: any = { messages };
+    if (mode) payload.mode = mode;
     if (system) payload.system = system;
     if (apiKey) payload.apiKey = apiKey; 
     if (model) payload.model = model;
@@ -97,9 +98,9 @@ export const getSymptomAdvice = async (history: { role: string, content: string 
   if (apiKey) {
     const messages = [
       ...history.map(h => ({ role: h.role === 'user' ? 'user' : 'assistant', content: h.content })),
-      { role: "user", content: currentSymptom }
+      { role: "user", content: `【系統強制提示：回覆必須完全使用繁體中文，且「必須」包含 --- 分隔符號】\n\n使用者症狀：${currentSymptom}` }
     ];
-    return await callUnifiedAPI(messages, instruction, "meta/llama-3.1-70b-instruct", apiKey);
+    return await callUnifiedAPI(messages, undefined, "meta/llama-3.1-70b-instruct", apiKey, 'symptoms');
   }
 
   // Fallback to Ollama
@@ -118,7 +119,7 @@ export const chatWithAI = async (history: { role: string, content: string }[], m
       ...history.map(h => ({ role: h.role === 'user' ? 'user' : 'assistant', content: h.content })),
       { role: "user", content: message }
     ];
-    return await callUnifiedAPI(messages, systemInstruction, "meta/llama-3.1-70b-instruct", apiKey);
+    return await callUnifiedAPI(messages, undefined, "meta/llama-3.1-70b-instruct", apiKey, 'chat');
   }
 
   // Fallback to Ollama

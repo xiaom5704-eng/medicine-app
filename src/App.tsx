@@ -279,6 +279,9 @@ export default function App() {
     setInputText('');
     setIsLoading(true);
 
+    // If in symptom tab, use handleSymptomSubmit logic but integrated here
+    // or just let it flow with the chatWithAI which now handles modes.
+
     try {
       await fetch('/api/messages', {
         method: 'POST',
@@ -287,11 +290,17 @@ export default function App() {
       });
 
       const startTime = Date.now();
-      const aiResponse = await chatWithAI(
-        messages.map(m => ({ role: m.role, content: m.content })), 
-        inputText,
-        userApiKey
-      );
+      const aiResponse = activeTab === 'symptoms'
+        ? await getSymptomAdvice(
+            messages.map(m => ({ role: m.role, content: m.content })),
+            inputText,
+            userApiKey
+          )
+        : await chatWithAI(
+            messages.map(m => ({ role: m.role, content: m.content })), 
+            inputText,
+            userApiKey
+          );
       const latency = Date.now() - startTime;
       updateMetrics(latency, !!aiResponse);
 
@@ -498,7 +507,11 @@ export default function App() {
         body: JSON.stringify(userMsg),
       });
 
-      const result = await getSymptomAdvice(messages, symptoms, userApiKey);
+      const result = await getSymptomAdvice(
+        messages.map(m => ({ role: m.role === 'user' ? 'user' : 'assistant', content: m.content })), 
+        symptoms, 
+        userApiKey
+      );
       setSymptomResult(result);
 
       const aiMsg: Message = { 
@@ -601,7 +614,15 @@ export default function App() {
             
             <div className="flex items-center gap-3 ml-4">
               <div className="hidden md:flex items-center px-3 py-1 bg-emerald-50 text-emerald-700 rounded-lg border border-emerald-100 text-[11px] font-bold">
-                當前模式：{userApiKey && nvidiaStatus === 'valid' ? 'NVIDIA NIM 雲端加速' : '本地 Ollama 運作'}
+                當前狀態：{
+                  activeTab === 'chat' ? '一般生活助手' : 
+                  activeTab === 'symptoms' ? '專業醫療顧問' : 
+                  '藥物辨識分析'
+                } ({
+                  (userApiKey && nvidiaStatus === 'valid') ? 'NVIDIA API' : 
+                  isOllamaOnline ? 'Ollama 本地端' : 
+                  '無可用服務'
+                })
               </div>
               <div className="flex items-center gap-2">
                 <div className="flex items-center gap-2 px-2 py-1 bg-slate-50 rounded-full border border-slate-200 cursor-help group/status relative">
@@ -847,7 +868,15 @@ export default function App() {
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
                 onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
-                placeholder={isListening ? '正在聆聽中，請說話...' : '輸入問題，或按麥克風說話...'}
+                placeholder={
+                  isListening 
+                    ? '正在聆聽中，請說話...' 
+                    : activeTab === 'chat' 
+                      ? '輸入問題（一般助手模式），或按麥克風說話...' 
+                      : activeTab === 'symptoms' 
+                        ? '請輸入症狀（醫療顧問模式），或按麥克風說話...'
+                        : '輸入問題，或按麥克風說話...'
+                }
                 className={`w-full bg-white border rounded-2xl py-4 pl-6 shadow-lg outline-none transition-all ${
                   isListening ? 'border-red-400 ring-2 ring-red-200 pr-28' : 'border-slate-200 pr-24'
                 }`}
