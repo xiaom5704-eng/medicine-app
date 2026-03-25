@@ -220,13 +220,28 @@ export default function App() {
   };
 
   const handleTestKey = async () => {
-    if (!userApiKey.trim()) return;
+    if (!userApiKey.trim()) {
+      setUserApiKey('');
+      setIsGeminiValid(false);
+      setKeyTestResult(null);
+      setSelectedEngine('ollama');
+      setShowApiKeyInput(false);
+      return;
+    }
+
     setIsTestingKey(true);
     setKeyTestResult(null);
     const isValid = await trackApiCall(() => testGeminiKey(userApiKey));
     setIsGeminiValid(isValid);
     setKeyTestResult(isValid ? 'success' : 'error');
     setIsTestingKey(false);
+    
+    if (isValid) {
+      setSelectedEngine('gemini');
+      setTimeout(() => {
+        setShowApiKeyInput(false);
+      }, 1500);
+    }
   };
 
   useEffect(() => {
@@ -889,7 +904,7 @@ export default function App() {
                   />
                   <button 
                     onClick={handleTestKey}
-                    disabled={isTestingKey || !userApiKey}
+                    disabled={isTestingKey}
                     className="px-6 py-3 bg-emerald-600 text-white rounded-xl text-sm font-bold hover:bg-emerald-700 transition-colors disabled:opacity-50 flex items-center gap-2"
                   >
                     {isTestingKey && <Loader2 size={16} className="animate-spin" />}
