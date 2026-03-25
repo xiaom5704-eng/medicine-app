@@ -135,7 +135,21 @@ export default function App() {
   const [isOllamaOnline, setIsOllamaOnline] = useState<boolean | null>(null);
   const [ollamaModel, setOllamaModel] = useState<string | null>(null);
   const [isGeminiValid, setIsGeminiValid] = useState<boolean>(false);
+  const [selectedEngine, setSelectedEngine] = useState<'gemini' | 'ollama'>(import.meta.env.VITE_GEMINI_API_KEY ? 'gemini' : 'ollama');
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
+
+  const handleEngineChange = (engine: 'gemini' | 'ollama') => {
+    if (engine === 'gemini') {
+      const hasKey = userApiKey || import.meta.env.VITE_GEMINI_API_KEY;
+      if (!hasKey) {
+        alert('請先配置 API 金鑰以啟用 Gemini');
+        setShowApiKeyInput(true);
+        setSelectedEngine('ollama');
+        return;
+      }
+    }
+    setSelectedEngine(engine);
+  };
   const [isTestingKey, setIsTestingKey] = useState(false);
   const [keyTestResult, setKeyTestResult] = useState<'success' | 'error' | null>(null);
   const [showGuideModal, setShowGuideModal] = useState(false);
@@ -365,7 +379,8 @@ export default function App() {
       const aiResponse = await trackApiCall(() => chatWithAI(
         messages.map(m => ({ role: m.role, content: m.content })), 
         inputText,
-        userApiKey
+        userApiKey,
+        selectedEngine
       ));
       const aiMsg: Message = { session_id: sessionId, role: 'assistant', content: aiResponse || '抱歉，我現在無法回答。' };
       
@@ -386,7 +401,7 @@ export default function App() {
       const isManualTitle = currentSession ? currentSession.is_manual_title : false;
 
       if (isNewSession || (currentSession && !isManualTitle && isDefaultTitle)) {
-        const generatedTitle = await trackApiCall(() => generateTitleSummary(inputText, aiResponse || '', userApiKey));
+        const generatedTitle = await trackApiCall(() => generateTitleSummary(inputText, aiResponse || '', userApiKey, selectedEngine));
         if (generatedTitle) {
           await fetch(`/api/sessions/${sessionId}`, {
             method: 'PATCH',
@@ -525,7 +540,7 @@ export default function App() {
     }
 
     try {
-      const result = await trackApiCall(() => analyzeMedications(medFiles.map(f => f.preview), targetLanguage, userApiKey));
+      const result = await trackApiCall(() => analyzeMedications(medFiles.map(f => f.preview), targetLanguage, userApiKey, selectedEngine));
       
       const userMsg: Message = {
         session_id: sessionId,
@@ -563,7 +578,7 @@ export default function App() {
       const isManualTitle = currentSession ? currentSession.is_manual_title : false;
 
       if (isNewSession || (currentSession && !isManualTitle && isDefaultTitle)) {
-        const generatedTitle = await trackApiCall(() => generateTitleSummary('請幫我分析這些藥物', result, userApiKey));
+        const generatedTitle = await trackApiCall(() => generateTitleSummary('請幫我分析這些藥物', result, userApiKey, selectedEngine));
         if (generatedTitle) {
           await fetch(`/api/sessions/${sessionId}`, {
             method: 'PATCH',
@@ -591,7 +606,7 @@ export default function App() {
     let sessionId = startingSessionId;
 
     try {
-      const result = await trackApiCall(() => getSymptomAdvice(symptoms, symptomMode, userApiKey));
+      const result = await trackApiCall(() => getSymptomAdvice(symptoms, symptomMode, userApiKey, selectedEngine));
       
       // Only show result if we haven't switched sessions
       if (currentSessionIdRef.current === startingSessionId) {
@@ -649,7 +664,7 @@ export default function App() {
       const isManualTitle = currentSession ? currentSession.is_manual_title : false;
 
       if (isNewSession || (currentSession && !isManualTitle && isDefaultTitle)) {
-        const generatedTitle = await trackApiCall(() => generateTitleSummary(symptoms, result, userApiKey));
+        const generatedTitle = await trackApiCall(() => generateTitleSummary(symptoms, result, userApiKey, selectedEngine));
         if (generatedTitle) {
           await fetch(`/api/sessions/${sessionId}`, {
             method: 'PATCH',
@@ -775,13 +790,20 @@ export default function App() {
 
           <div className="flex items-center gap-4">
             {/* AI Status Box */}
-            <div className="hidden md:flex items-center bg-emerald-50 text-emerald-700 px-4 py-1.5 rounded-lg text-sm font-medium border border-emerald-100">
-              當前狀態：{isOllamaOnline ? '一般生活助手 (Ollama 本地端)' : (isGeminiValid ? '一般生活助手 (Gemini 雲端)' : '未連線 AI')}
+            <div className="hidden md:flex items-center bg-white px-4 py-1.5 rounded-lg text-sm font-medium border border-slate-200 shadow-sm">
+              <span className="text-slate-600 mr-2">當前狀態：</span>
+              {selectedEngine === 'gemini' 
+                ? <span className="text-blue-600 font-bold flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-blue-500"></div> Gemini 雲端模式</span>
+                : <span className="text-emerald-600 font-bold flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-emerald-500"></div> Ollama 本地端</span>}
             </div>
 
-            {/* Indicators */}
-            <div className="hidden sm:flex items-center gap-2">
-              <div className="relative group flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-medium text-slate-600 cursor-help">
+            {/* Engine Selectors */}
+            <div className="hidden sm:flex items-center gap-2 bg-slate-100 p-1 rounded-full">
+              <button 
+                onClick={() => handleEngineChange('ollama')}
+                className={`relative group flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${selectedEngine === 'ollama' ? 'bg-white text-emerald-700 shadow-sm border border-emerald-200' : 'text-slate-500 hover:text-slate-700 border border-transparent'}`}
+                title="強制切換至 Ollama 本地端"
+              >
                 <div className={`w-2 h-2 rounded-full ${isOllamaOnline ? 'bg-emerald-500' : 'bg-slate-300'}`} />
                 Ollama
                 {isOllamaOnline && ollamaModel && (
@@ -789,11 +811,15 @@ export default function App() {
                     目前模型：{ollamaModel}
                   </div>
                 )}
-              </div>
-              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-medium text-slate-600">
+              </button>
+              <button 
+                onClick={() => handleEngineChange('gemini')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${selectedEngine === 'gemini' ? 'bg-white text-blue-700 shadow-sm border border-blue-200' : 'text-slate-500 hover:text-slate-700 border border-transparent'}`}
+                title="強制切換至 Gemini 雲端模式"
+              >
                 <div className={`w-2 h-2 rounded-full ${isGeminiValid ? 'bg-blue-500' : 'bg-slate-300'}`} />
                 Gemini
-              </div>
+              </button>
             </div>
 
             {/* Config Button */}
